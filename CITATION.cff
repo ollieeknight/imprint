@@ -19,10 +19,9 @@ authors:
     # orcid: 'https://orcid.org/0000-0000-0000-0000'  # TODO: add before release
 repository-code: https://github.com/ollieeknight/imprint
 license: MIT
-# TODO: set to the released tag and its Zenodo DOI before minting the record.
-# version: 2.0.0  # must match manifest.version in nextflow.config
-# doi: 10.5281/zenodo.0000000
-# date-released: 2026-09-11
+version: 0.1.0
+date-released: '2026-09-11'
+# doi: added after Zenodo mints the record for this release.
 keywords:
   - somatic variant calling
   - clonal haematopoiesis
