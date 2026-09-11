@@ -1,0 +1,19 @@
+# Nextflow
+.nextflow/
+.nextflow*
+work/
+results/
+outs/
+
+*.sif
+*.img
+.apptainer/
+
+.DS_Store
+Thumbs.db
+# Keep analysis notes; exclude sequencing outputs and analysis artefacts.
+analysis/*
+!analysis/README.md
+
+# Local analysis output trees
+*_outs/

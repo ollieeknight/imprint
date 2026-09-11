@@ -1,0 +1,35 @@
+Bootstrap: docker
+From: condaforge/miniforge3:24.11.3-2
+
+%labels
+    maintainer  imprint pipeline
+    bwa_mem3    0.2.1
+    samtools    1.23.1
+    fgbio       4.0.0
+    r_base      4.4.2
+    fastdup     1.0.0
+
+%post
+    mamba install -y -c bioconda -c conda-forge \
+        bwa-mem3=0.2.1 \
+        samtools=1.23.1 \
+        fgbio=4.0.0 \
+        r-base=4.4.2 \
+        r-tidyverse \
+        riker \
+        fastdup=1.0.0
+    mamba clean -afy
+
+%environment
+    export PATH="/opt/conda/bin:$PATH"
+
+%runscript
+    exec "$@"
+
+%test
+    bwa-mem3 version
+    bwa-mem3 mem 2>&1 | grep -F -- '-C'
+    samtools --version | head -1
+    fgbio --version
+    riker --version
+    fastdup --version

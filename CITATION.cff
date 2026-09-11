@@ -1,0 +1,32 @@
+cff-version: 1.2.0
+message: If you use imprint, please cite it using these metadata.
+title: >-
+  imprint: somatic variant calling in paired, FACS-sorted immune-cell
+  populations
+abstract: >-
+  imprint is a Nextflow DSL2 pipeline that calls somatic variants in paired,
+  FACS-sorted immune-cell populations from bulk WES, WGS or xGen UDSeq data.
+  Each donor provides one reference population and one or more populations to
+  compare against it. Bulk calling combines Mutect2, Strelka2 and DeepSomatic
+  with Vafator read evidence, VEP annotation and VarLociraptor probabilities.
+  Duplex libraries are called with DupCaller on raw read families.
+type: software
+authors:
+  - given-names: Oliver
+    family-names: Knight
+    email: oliver.knight@charite.de
+    affiliation: Charité – Universitätsmedizin Berlin
+    # orcid: 'https://orcid.org/0000-0000-0000-0000'  # TODO: add before release
+repository-code: https://github.com/ollieeknight/imprint
+license: MIT
+# TODO: set to the released tag and its Zenodo DOI before minting the record.
+# version: 2.0.0  # must match manifest.version in nextflow.config
+# doi: 10.5281/zenodo.0000000
+# date-released: 2026-09-11
+keywords:
+  - somatic variant calling
+  - clonal haematopoiesis
+  - immune cell populations
+  - duplex sequencing
+  - nextflow
+  - bioinformatics

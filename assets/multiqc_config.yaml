@@ -1,0 +1,29 @@
+report_header_info:
+    - Pipeline: 'imprint'
+    - Description: 'Somatic mutation pipeline'
+
+# Keep this list aligned with the reports staged in subworkflows/qc.nf.
+run_modules:
+    - custom_content
+    - fastp
+    - mosdepth
+    - picard
+    - fgbio
+    - verifybamid
+    - somalier
+
+report_section_order:
+    pipeline_config:
+        order: -1000
+    fastp:
+        order: -900
+    mosdepth:
+        order: -850
+    picard:
+        order: -800
+    fgbio:
+        order: -750
+    verifybamid:
+        order: -700
+    somalier:
+        order: -650

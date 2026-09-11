@@ -1,0 +1,4 @@
+patient,cell_type,status,fastq_1,fastq_2
+HC01,CD14,0,/data/HC01_CD14_R1.fastq.gz,/data/HC01_CD14_R2.fastq.gz
+HC01,NKG2A,1,/data/HC01_NKG2A_R1.fastq.gz,/data/HC01_NKG2A_R2.fastq.gz
+HC01,NKG2C,1,/data/HC01_NKG2C_R1.fastq.gz,/data/HC01_NKG2C_R2.fastq.gz

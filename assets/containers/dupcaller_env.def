@@ -1,0 +1,52 @@
+Bootstrap: docker
+From: python:3.12-slim
+
+# Pin the DupCaller dev commit in %labels and %post.
+# Build: apptainer build dupcaller_1.1.2-dev53eb785.sif assets/containers/dupcaller_env.def
+
+%labels
+    maintainer        imprint pipeline
+    dupcaller         1.1.2
+    dupcaller_commit  53eb785
+    dupcaller_source  https://github.com/AlexandrovLab/DupCaller
+
+%post
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        git \
+        gcc \
+        zlib1g-dev \
+        libbz2-dev \
+        liblzma-dev \
+        libcurl4-openssl-dev \
+        libssl-dev \
+        libhdf5-dev \
+        tabix
+    rm -rf /var/lib/apt/lists/*
+
+    git clone https://github.com/AlexandrovLab/DupCaller /opt/DupCaller
+    git -C /opt/DupCaller checkout 53eb785
+    git -C /opt/DupCaller rev-parse HEAD > /opt/dupcaller_commit.txt
+
+    pip install --no-cache-dir /opt/DupCaller
+    rm -rf /opt/DupCaller/.git
+
+%environment
+    export MPLCONFIGDIR=/tmp
+    export HOME=/tmp
+    # DUPCALLER_ESTIMATE replaces this cache with a task-local path.
+    export SIGPROFILERPLOTTING_VOLUME=/tmp/sigprofilerplotting
+
+%runscript
+    exec "$@"
+
+%test
+    python -c 'import DupCaller_sub; print(DupCaller_sub.__version__)'
+    DupCaller.py call --help > /dev/null
+    DupCaller.py estimate --help > /dev/null
+    DupCaller.py summarize --help > /dev/null
+    DupCaller.py index --help > /dev/null
+    DupCaller.py index-dbs --help > /dev/null
+    bgzip --version | head -1
+    tabix --version | head -1

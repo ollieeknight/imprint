@@ -1,0 +1,73 @@
+Bootstrap: docker
+From: nmendozam/kir-mapper:latest
+
+%labels
+    maintainer   imprint pipeline
+    base         nmendozam/kir-mapper
+
+%post
+    export DEBIAN_FRONTEND=noninteractive
+
+    # kir-mapper configuration; the task substitutes the database path.
+    cat > /opt/.kir-mapper << 'EOF'
+db=__KIR_MAPPER_DB__
+samtools=/usr/local/bin/samtools
+bcftools=/usr/local/bin/bcftools
+bwa=/usr/bin/bwa
+whatshap=/usr/bin/whatshap
+freebayes=/usr/bin/freebayes
+picard=/home/picard.jar
+star=/usr/bin/STAR
+shapeit4=/usr/bin/shapeit4
+EOF
+
+    # R packages
+    Rscript -e "install.packages(
+        c('ggplot2','plotly','htmlwidgets','stringr','shiny','shinyjs',
+          'shinyalert','purrr','readr','dplyr','tidyr','DT','forcats','pacman'),
+        repos='https://cloud.r-project.org', Ncpus=4)"
+
+
+%environment
+    export LANG=en_US.UTF-8
+    export LC_ALL=en_US.UTF-8
+    export MPLCONFIGDIR=/tmp
+    export HOME=/tmp
+
+%runscript
+    exec "$@"
+
+%test
+    FAIL=0
+    ok()   { echo "OK   $1"; }
+    fail() { echo "FAIL $1"; FAIL=1; }
+
+    # Binaries present and executable
+    for cmd in bwa samtools bcftools freebayes whatshap kir-mapper; do
+        command -v $cmd >/dev/null 2>&1 && ok "$cmd found" || fail "$cmd missing"
+    done
+
+    # Check for missing runtime libraries.
+    samtools --version >/dev/null 2>&1  && ok "samtools runs"  || fail "samtools broken"
+    bcftools --version >/dev/null 2>&1  && ok "bcftools runs"  || fail "bcftools broken"
+    bwa 2>&1 | grep -q "Program: bwa"   && ok "bwa runs"       || fail "bwa broken"
+    freebayes --version >/dev/null 2>&1 && ok "freebayes runs" || fail "freebayes broken"
+
+    # Picard jar (bundled in base image)
+    [ -f /home/picard.jar ] && ok "picard.jar" || fail "picard.jar missing at /home/picard.jar"
+
+    # kir-mapper subcommands respond (no db needed for --help)
+    kir-mapper map      --help >/dev/null 2>&1 && ok "kir-mapper map"      || fail "kir-mapper map broken"
+    kir-mapper ncopy    --help >/dev/null 2>&1 && ok "kir-mapper ncopy"    || fail "kir-mapper ncopy broken"
+    kir-mapper genotype --help >/dev/null 2>&1 && ok "kir-mapper genotype" || fail "kir-mapper genotype broken"
+
+    # Check the R packages used by kir-mapper.
+    Rscript -e "
+        pkgs <- c('ggplot2','plotly','htmlwidgets','stringr','shiny','shinyjs',
+                  'shinyalert','purrr','readr','dplyr','tidyr','DT','forcats','pacman')
+        missing <- pkgs[!sapply(pkgs, requireNamespace, quietly=TRUE)]
+        if (length(missing)) { cat('MISSING:', paste(missing, collapse=' '), '\n'); quit(status=1) }
+        cat('R packages OK\n')
+    " 2>/dev/null && ok "R packages" || fail "R packages"
+
+    [ "$FAIL" -eq 0 ] && echo "ALL TESTS PASSED" || { echo "TESTS FAILED"; exit 1; }
