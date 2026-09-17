@@ -1,6 +1,5 @@
 include { FASTP } from '../modules/qc'
 
-// Remove lane fields before downstream task hashes are calculated.
 def sampleMeta(meta) {
     meta.subMap(meta.keySet() - ['run_count', 'run_id'])
 }
@@ -18,15 +17,13 @@ include { DUPCALLER_TRIM_LANE; DUPCALLER_ALIGN_LANE; DUPCALLER_SORT_LANE; DUPCAL
 
 workflow ALIGN {
     take:
-        ch_fastq // [meta, r1, r2], one entry per lane; meta contains run_count
+        ch_fastq
 
     main:
         def trim_front = params.trim_front as Integer
 
-        // Adapter trimming: adapters detected per pair, reads under 36 bp dropped
         FASTP(ch_fastq)
 
-        // Split fastp outputs for each consumer.
         def ch_fastp_json_split = FASTP.out.json.multiMap { meta, json ->
             short_insert: [meta, json]
             read_length:  [meta, json]
@@ -42,11 +39,9 @@ workflow ALIGN {
             report:   [meta, html]
         }
         if (!params.dupcaller) {
-            // Bulk path.
             BWA_MEM3_LANE_BULK(ch_fastp_trimmed_split.alignment)
             SORT_LANE_BULK(BWA_MEM3_LANE_BULK.out.bam)
 
-            // Merge lane BAMs per sample before duplicate marking.
             SORT_LANE_BULK.out.bam
                 .map { meta, bam -> [groupKey(meta.id, meta.run_count), meta, bam] }
                 .groupTuple(by: 0)
@@ -70,7 +65,6 @@ workflow ALIGN {
             ch_mode_trimmed_reads = ch_fastp_trimmed_split.mixcr
 
         } else {
-            // xGen UDSeq raw-family path.
             DUPCALLER_TRIM_LANE(
                 ch_fastq,
                 file(params.dupcaller_umi_allowlist),
@@ -110,7 +104,6 @@ workflow ALIGN {
             ch_mode_trimmed_reads = DUPCALLER_TRIM_LANE.out.reads
         }
 
-    // Detect short inserts from fastp for Mutect2 soft-clip handling.
     ch_short_inserts = ch_fastp_json_split.short_insert
         .map { meta, json -> [groupKey(meta.id, meta.run_count), json] }
         .groupTuple()

@@ -7,7 +7,6 @@ workflow STRELKA2 {
         ch_intervals_gz // [intervals_gz, intervals_tbi]
 
     main:
-        // Cap qualities at Q70 because Manta 1.6.0 crashes above Q70.
         ch_paired_bams.multiMap { meta, tb, tbai, nb, nbai ->
             tumour: [meta, 'tumour', meta.tumor_id,  tb, tbai]
             normal: [meta, 'normal', meta.normal_id, nb, nbai]

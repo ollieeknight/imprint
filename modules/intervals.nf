@@ -18,7 +18,6 @@ process PREPARE_INTERVALS {
     """
 }
 
-// Genome mode: pass file('NO_FILE') as intervals_bed; -L flag is omitted and genome_scatter_count is used.
 process SPLIT_INTERVALS {
     label 'process_low'
     label 'process_low_memory'

@@ -2,7 +2,6 @@ process FASTP {
     label 'process_medium'
     tag "${meta.id}"
     container "${params.container_fastp}"
-    // Resource settings live in conf/process.config.
     publishDir { "${params.outdir}/${meta.donor}/samples/${meta.cell_type}/qc/fastp" }, mode: 'copy',
         saveAs: { fn -> fn.endsWith('_trimmed.fastq.gz') ? null : fn }
 
@@ -15,8 +14,6 @@ process FASTP {
     tuple val(meta), path("${meta.id}_${meta.run_id}_fastp.html"),                                      emit: html
 
     script:
-    // DupCaller mode consumes raw FASTQs via DUPCALLER_TRIM_LANE and takes its MiXCR
-    // reads from there too, so fastp's trimmed output has no consumer: report only.
     def output_args = params.dupcaller ? '' : """--out1 ${meta.id}_${meta.run_id}_R1_trimmed.fastq.gz \\
         --out2 ${meta.id}_${meta.run_id}_R2_trimmed.fastq.gz \\
        """

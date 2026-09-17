@@ -20,7 +20,6 @@ conda activate gatk
 
 gsutil -m cp -n gs://gcp-public-data--gnomad/release/4.1.1/vcf/* "${DOWNLOAD_DIR}"
 
-# PASS-only, left-aligned, AC+AF+AN-stripped per-chr VCF
 vcf_complete () {
     local vcf=$1
     [[ -s "${vcf}" && -s "${vcf}.tbi" ]] &&

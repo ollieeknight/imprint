@@ -13,7 +13,6 @@ workflow MUTECT2 {
         ch_paired_bams_scattered // [meta+{interval_count}, tb, tbai, nb, nbai, interval_gz, interval_tbi]
 
     main:
-        // Mutect2, scattered.
         CALL(ch_paired_bams_scattered)
 
         CALL.out.unfiltered_vcf
@@ -50,7 +49,6 @@ workflow MUTECT2 {
 
         MERGE_STATS(ch_mutect2_grouped_stats)
 
-        // GetPileupSummaries, scattered across the same intervals.
         ch_paired_bams_scattered.multiMap { meta, tb, tbai, nb, nbai, interval_gz, interval_tbi ->
             tumour: [meta, 'tumour', meta.tumor_id,  tb, tbai, interval_gz, interval_tbi]
             normal: [meta, 'normal', meta.normal_id, nb, nbai, interval_gz, interval_tbi]
@@ -71,7 +69,6 @@ workflow MUTECT2 {
 
         GATHER_PILEUPS(ch_pileups_to_gather)
 
-        // 3. CalculateContamination
         GATHER_PILEUPS.out.pileup
             .branch { _meta, role, _sample_id, _pileup ->
                 tumour: role == 'tumour'
@@ -90,7 +87,6 @@ workflow MUTECT2 {
 
         CONTAMINATION(ch_contamination_input)
 
-        // 4. FilterMutectCalls
         def ch_contamination_split = CONTAMINATION.out.contamination.multiMap { meta, table ->
             filtering: [meta, table]
             manifest:  [meta, table]

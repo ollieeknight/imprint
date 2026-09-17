@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""Collate kir-mapper's nested donor output into stable, flat tables."""
 
 from __future__ import annotations
 
@@ -193,8 +192,6 @@ def collate_kir(donor: str, ncopy_dir: Path, genotype_dir: Path, output_dir: Pat
         candidate_rows,
     )
 
-    # Nextflow stages directory inputs as symlinks by default. Dereference them
-    # so the archive contains native kir-mapper files rather than work-dir links.
     with tarfile.open(archive_path, "w:gz", dereference=True) as archive:
         archive.add(ncopy_dir, arcname="ncopy")
         archive.add(genotype_dir, arcname="genotype")

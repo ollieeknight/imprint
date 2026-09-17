@@ -1,15 +1,6 @@
 Bootstrap: docker
 From: python:3.12-slim
 
-# Pin the DupCaller dev commit in %labels and %post.
-# Build: apptainer build dupcaller_1.1.2-dev53eb785.sif assets/containers/dupcaller_env.def
-
-%labels
-    maintainer        imprint pipeline
-    dupcaller         1.1.2
-    dupcaller_commit  53eb785
-    dupcaller_source  https://github.com/AlexandrovLab/DupCaller
-
 %post
     export DEBIAN_FRONTEND=noninteractive
     apt-get update && apt-get install -y --no-install-recommends \
@@ -35,7 +26,6 @@ From: python:3.12-slim
 %environment
     export MPLCONFIGDIR=/tmp
     export HOME=/tmp
-    # DUPCALLER_ESTIMATE replaces this cache with a task-local path.
     export SIGPROFILERPLOTTING_VOLUME=/tmp/sigprofilerplotting
 
 %runscript

@@ -7,13 +7,13 @@ species:
     chrY: 1
 
 samples:
-  tumor:                                  # sorted NK subset (NKG2A or NKG2C)
+  tumor:
     somatic-effective-mutation-rate: 1e-6
     inheritance:
       clonal:
         from: normal
         somatic: true
-  normal:                                 # CD14+ monocytes may carry clonal haematopoiesis
+  normal:
     somatic-effective-mutation-rate: 1e-6
 
 events:

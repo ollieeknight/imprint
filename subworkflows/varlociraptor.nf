@@ -12,7 +12,6 @@ workflow VARLOCIRAPTOR {
         ch_sex         // [[sample_id, sex], ...] single list (same channel CHARACTERISATION uses)
 
     main:
-        // Select the ploidy scenario from Somalier sex; UNKNOWN uses XX.
         def ch_scenario = ch_paired_bams
             .combine(ch_sex.map { it -> [it] })
             .map { meta, _tb, _tbai, _nb, _nbai, sex_list ->
@@ -24,7 +23,6 @@ workflow VARLOCIRAPTOR {
                 [meta.pair_id, scenario]
             }
 
-        // Keep each tumour and normal stream keyed to its pair.
         def ch_sample_bams = ch_paired_bams.flatMap { meta, tb, tbai, nb, nbai ->
             [
                 [[meta.pair_id, 'tumour'], meta, 'tumour', meta.tumor_id,  tb, tbai],

@@ -1,11 +1,8 @@
-// Separate alignment and sorting to give each its own SLURM walltime limit.
-// Keep fixmate with alignment: it needs BWA's name-collated output.
 process BWA_MEM3_LANE_BULK {
     label 'process_dynamic'
     label 'process_very_long'
     tag "${meta.id}"
     container "${params.container_align}"
-    // bwa-mem3 index is ~32 GB resident regardless of input size; no sort buffer here
     memory { 48.GB }
     cpus   { (reads1.size() + reads2.size()) < 5.GB ? 8 : (reads1.size() + reads2.size()) < 15.GB ? 12 : (reads1.size() + reads2.size()) < 60.GB ? 16 : 24 }
 
@@ -35,7 +32,6 @@ process SORT_LANE_BULK {
     label 'process_very_long'
     tag "${meta.id}"
     container "${params.container_samtools}"
-    // No bwa index resident, so the whole allocation is sort buffer
     memory { bam.size() < 20.GB ? 24.GB : 48.GB }
     cpus   { 8 }
 
@@ -47,12 +43,11 @@ process SORT_LANE_BULK {
 
     script:
     def lane_bam    = bam.name.replace('.fixmate.bam', '.bam')
-    // Reserve ~4 GB for OS/overhead; split remainder across sort threads
+
     def total_gb    = task.memory ? task.memory.toGiga() : 24
     def sort_mem_gb = Math.max(1, ((total_gb - 4) / task.cpus).intValue())
     """
     samtools sort -@ ${task.cpus} -m ${sort_mem_gb}G -O bam -o "${lane_bam}" ${bam}
-
     """
 }
 
@@ -70,8 +65,6 @@ process MERGE_TAGGED_BAMS {
     tuple val(meta), path("${meta.id}_merged_tagged.bam"), path("${meta.id}_merged_tagged.bam.bai"), emit: tagged_bam
 
     script:
-    // A single-lane sample has nothing to merge; link the lane BAM rather than
-    // copying tens of gigabytes across scratch.
     def bam_list = bams instanceof List ? bams : [bams]
     def merge_cmd = bam_list.size() == 1
         ? "ln -s \"\$(readlink -f ${bam_list[0]})\" ${meta.id}_merged_tagged.bam"
@@ -79,7 +72,6 @@ process MERGE_TAGGED_BAMS {
     """
     ${merge_cmd}
     samtools index ${meta.id}_merged_tagged.bam
-
     """
 }
 

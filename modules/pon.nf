@@ -44,9 +44,6 @@ process GENOMICSDB_IMPORT_PON {
     def mem_gb = task.memory ? task.memory.toGiga() - 4 : 16
     def effective_bed = params.off_target ? params.padded_intervals_bed : params.intervals_bed
     def vcf_inputs = vcfs.collect { v -> "-V ${v}" }.join(" \\\n        ")
-    // GenomicsDBImport always needs intervals. A sequence dictionary is not a
-    // valid -L argument, so genome mode builds a GATK .intervals list from the
-    // FASTA index instead.
     def intervals_flag = params.genome ? '-L genome.intervals' : "-L \"${effective_bed}\""
     def genome_intervals = params.genome
         ? "awk '{ print \$1\":1-\"\$2 }' \"${params.genome_fai}\" > genome.intervals"

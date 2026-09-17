@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""Trim and allowlist-correct xGen UDSeq UMIs for DupCaller."""
 
 import argparse
 import gzip
@@ -11,8 +10,6 @@ from pathlib import Path
 def open_text(path, mode):
     if not str(path).endswith(".gz"):
         return open(path, mode)
-    # Level 9 on the write side dominates this script's runtime (~3-5 MB/s per stream)
-    # and these FASTQs are transient work-dir intermediates, not published output.
     return gzip.open(path, mode + "t", **({"compresslevel": 1} if "w" in mode else {}))
 
 

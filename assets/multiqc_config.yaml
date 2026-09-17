@@ -2,7 +2,6 @@ report_header_info:
     - Pipeline: 'imprint'
     - Description: 'Somatic mutation pipeline'
 
-# Keep this list aligned with the reports staged in subworkflows/qc.nf.
 run_modules:
     - custom_content
     - fastp

@@ -1,5 +1,4 @@
 include { MOSDEPTH; VERIFYBAMID2; SOMALIER_EXTRACT; SOMALIER_RELATE; RIKER_QC; PER_BASE_ERROR_RATE; MULTIQC } from '../modules/qc'
-// Riker receives capture intervals only in WES mode.
 
 workflow QC {
     take:
@@ -34,10 +33,8 @@ workflow QC {
             }
         )
 
-        // Somalier
         SOMALIER_EXTRACT(ch_bams_split.somalier)
 
-        // One donor per line for Somalier relatedness checks.
         def ch_groups = ch_bams_split.groups
             .map { meta, _bam, _bai -> [meta.donor, meta.id] }
             .groupTuple()
@@ -51,13 +48,11 @@ workflow QC {
             manifest: [meta, files]
         }
 
-        // Riker metrics feed both Picard and fgbio MultiQC modules.
         def ch_riker_split = RIKER_QC.out.metrics.multiMap { meta, files ->
             multiqc:  [meta, files]
             manifest: [meta, files]
         }
 
-        // Stage configured MultiQC reports.
         ch_align_reports
             .mix(ch_mosdepth_split.multiqc.map { _meta, f -> f })
             .mix(ch_riker_split.multiqc.map { _meta, f -> f })

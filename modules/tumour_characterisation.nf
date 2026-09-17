@@ -27,7 +27,7 @@ process OPTITYPE_EXTRACT {
 
     input:
     tuple val(meta), path(bam), path(bai)
-    path hla_files  // FASTA + pre-built yara index files, staged together into workdir
+    path hla_files
 
     output:
     tuple val(meta), path("r1.mapped.bam"), path("r1.mapped.bam.bai"),
@@ -283,8 +283,6 @@ process TELSEQ {
     tuple val(meta), path("${meta.id}.telseq.txt"), optional: true, emit: telseq
 
     script:
-    // pre-dedup merged BAM: telomeric reads are repeat-heavy and over-flagged as duplicates,
-    // and telseq's depth normalisation assumes duplicates intact
     def exome_arg = (!params.genome && params.intervals_bed) ? "-e ${params.intervals_bed}" : ''
     def rlen      = meta.read_length ?: 100
     """

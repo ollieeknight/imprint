@@ -38,7 +38,6 @@ process CALL {
         --max-mnp-distance 2 \\
         --native-pair-hmm-threads ${task.cpus} \\
         --tmp-dir .
-
     """
 }
 
@@ -173,7 +172,6 @@ process FILTER {
     """
 }
 
-// BQSR follows overlap correction; both steps alter qualities before error-model fitting.
 process BASE_RECALIBRATOR {
     label 'process_low'
     label 'process_high_memory'
@@ -207,7 +205,6 @@ process BASE_RECALIBRATOR {
     """
 }
 
-// Do not statically quantise recalibrated qualities.
 process APPLY_BQSR {
     label 'process_low'
     label 'process_high_memory'

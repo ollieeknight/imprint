@@ -26,13 +26,11 @@ process DUPCALLER_TRIM_LANE {
     """
 }
 
-// Keep alignment and sorting separate; omit fixmate for duplex reads.
 process DUPCALLER_ALIGN_LANE {
     label 'process_dynamic'
     label 'process_very_long'
     tag "${meta.id}"
     container "${params.container_align}"
-    // Index-dominated: the whole allocation is bwa, none of it is sort buffer
     memory { 48.GB }
     cpus   { (reads1.size() + reads2.size()) < 5.GB ? 8 : (reads1.size() + reads2.size()) < 15.GB ? 12 : (reads1.size() + reads2.size()) < 60.GB ? 16 : 24 }
 
@@ -51,14 +49,11 @@ process DUPCALLER_ALIGN_LANE {
     """
 }
 
-// Kept separate from SORT_LANE_BULK rather than sharing it: renaming that process
-// would change its task hash and invalidate every cached bulk lane.
 process DUPCALLER_SORT_LANE {
     label 'process_dynamic'
     label 'process_very_long'
     tag "${meta.id}"
     container "${params.container_samtools}"
-    // No bwa index resident, so the whole allocation is sort buffer
     memory { bam.size() < 20.GB ? 24.GB : 48.GB }
     cpus   { 8 }
 
@@ -70,7 +65,6 @@ process DUPCALLER_SORT_LANE {
 
     script:
     def lane_bam    = bam.name.replace('.unsorted.bam', '.bam')
-    // Reserve ~4 GB for OS/overhead; split remainder across sort threads
     def total_gb    = task.memory ? task.memory.toGiga() : 24
     def sort_mem_gb = Math.max(1, ((total_gb - 4) / task.cpus).intValue())
     """
@@ -165,7 +159,6 @@ process DUPCALLER_CALL {
     label 'process_very_long'
     tag "${meta.pair_id}"
     container "${params.container_dupcaller}"
-    // Publish the DupCaller result tree unchanged.
     publishDir { "${params.outdir}/${meta.donor}/pairs/${meta.pair_dir}/dupcaller" }, mode: 'copy'
 
     input:
@@ -191,8 +184,6 @@ process DUPCALLER_CALL {
     tuple val(meta), path('calls'), emit: calls
 
     script:
-    // noise_masks and indel_epon always stage a file so the input arity stays fixed;
-    // the subworkflow says whether those files are real resources or placeholders.
     def noiseArg  = use_noise_masks ? "-m ${noise_masks.join(' ')}" : ''
     def indelArg  = params.dupcaller_indel_epon ? "-id ${indel_epon}" : ''
     def rescueArg = params.dupcaller_rescue ? '--rescue' : ''
@@ -220,7 +211,6 @@ process DUPCALLER_CALL {
         -mq ${params.dupcaller_mapq} \
         -w ${params.dupcaller_window_size}
 
-    # Per-worker scratch; DupCaller leaves it behind and it must not reach the outputs.
     rm -rf "${meta.pair_id}/tmp"
 
     for required in \
@@ -244,8 +234,6 @@ process DUPCALLER_CALL {
         test -s "${meta.pair_id}/\$required"
     done
 
-    # Sort a compressed copy by header contig order and position for tabix.
-    # Retain the original VCFs, including uncompressed _fail.vcf files.
     for vcf in \
         "${meta.pair_id}/SBS/${meta.pair_id}_sbs.vcf" \
         "${meta.pair_id}/INDEL/${meta.pair_id}_indel.vcf" \
@@ -260,8 +248,6 @@ process DUPCALLER_CALL {
         tabix -p vcf "\$vcf.gz"
     done
 
-    # DupCaller names the sample after the output directory, so the rename happens
-    # only once the tool is done with it.
     mv "${meta.pair_id}" calls
     """
 }
@@ -271,8 +257,6 @@ process DUPCALLER_ESTIMATE {
     label 'process_long'
     tag "${meta.pair_id}"
     container "${params.container_dupcaller}"
-    // Only the burden tree is published here; the merged sample directory is a
-    // channel-only handoff to DUPCALLER_SUMMARIZE.
     publishDir { "${params.outdir}/${meta.donor}/pairs/${meta.pair_dir}/dupcaller" }, mode: 'copy',
         saveAs: { fn -> fn == 'burden' ? 'burden' : null }
 
@@ -290,7 +274,6 @@ process DUPCALLER_ESTIMATE {
     tuple val(meta), path("${meta.pair_id}"),   emit: sample_dir
 
     script:
-    // estimate writes beside its input directory and uses its name.
     """
     # sigProfilerPlotting caches its matplotlib figure templates inside its own
     # package directory, which is read-only in the image. Its own environment
@@ -339,8 +322,6 @@ process DUPCALLER_SUMMARIZE {
 
     output:
     path('dupcaller_cohort_summary.txt'), emit: summary
-    // summarize writes '<prefix>_SBS96_{uncorrected,corrected,genome}.txt'. Keep it
-    // required: summarize aborts before this point if any sample input is missing.
     path('dupcaller_cohort_summary_SBS96_*.txt'), emit: sbs96
 
     script:

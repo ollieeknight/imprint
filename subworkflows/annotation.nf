@@ -11,15 +11,14 @@ include { VARLOCIRAPTOR } from './varlociraptor'
 
 workflow ANNOTATION {
     take:
-        ch_paired_bams   // [meta, tumor_bam, tumor_bai, normal_bam, normal_bai]
-        ch_mutect2       // [meta, vcf, tbi]
-        ch_strelka_snv   // [meta, vcf, tbi], pre-concatenation SNV
-        ch_strelka_indel // [meta, vcf, tbi], pre-concatenation indel
-        ch_deepsomatic   // [meta, vcf, tbi]
-        ch_sex           // [[sample_id, sex], ...] single list, for varlociraptor scenario ploidy
+        ch_paired_bams
+        ch_mutect2
+        ch_strelka_snv
+        ch_strelka_indel
+        ch_deepsomatic
+        ch_sex
 
     main:
-        // 1. Concatenate PASS-only Strelka2 SNVs and indels.
         ch_strelka_snv
             .map { meta, vcf, tbi -> [meta.pair_id, meta, vcf, tbi] }
             .join(
@@ -31,8 +30,6 @@ workflow ANNOTATION {
 
         STRELKA2_MERGE(ch_strelka_for_concat)
 
-        // 2. Build ensemble input: Mutect2 (ENSEMBLE_CONSENSUS PASS-filters internally) +
-        //    PASS-only Strelka2 calls + PASS-only DeepSomatic calls.
         ch_mutect2.map { meta, vcf, tbi -> [meta.pair_id, meta, [m2_vcf: vcf, m2_tbi: tbi]] }
             .mix(STRELKA2_MERGE.out.all_vcf.map { meta, vcf, tbi -> [meta.pair_id, meta, [st_vcf: vcf, st_tbi: tbi]] })
             .mix(ch_deepsomatic.map { meta, vcf, tbi -> [meta.pair_id, meta, [ds_vcf: vcf, ds_tbi: tbi]] })
@@ -53,7 +50,6 @@ workflow ANNOTATION {
             varlociraptor: [meta, vcf, tbi]
         }
 
-        // 3. Annotate consensus sites with per-sample AF/AC/DP + MQ/BQ/position rank-sum QC (vafator).
         ch_ensemble_split.vafator
             .map { meta, vcf, tbi -> [meta.pair_id, meta, vcf, tbi] }
             .join(
@@ -67,12 +63,10 @@ workflow ANNOTATION {
 
         VAFATOR(ch_vafator_input)
 
-        // Calculate VarLociraptor posteriors from ensemble candidates.
         VARLOCIRAPTOR(ch_paired_bams, ch_ensemble_split.varlociraptor, ch_sex)
 
         TUMOR_NORMAL_FILTER(VAFATOR.out.vcf)
 
-        // Annotate the final consensus with VEP.
         VEP_ANNOTATE(
             TUMOR_NORMAL_FILTER.out.vcf.map { meta, vcf, tbi -> [meta, 'somatic', vcf, tbi] },
             file(params.spliceai_snv_vcf),
@@ -83,8 +77,6 @@ workflow ANNOTATION {
             file("${params.dbnsfp_gz}.tbi")
         )
 
-        // Merge VarLociraptor PROB_* fields onto the VEP-annotated VCF.
-        // Match symbolic deletions to explicit alleles by chromosome, position and length.
         VEP_ANNOTATE.out.vcf
             .map { meta, _mutation_type, vcf, tbi -> [meta.pair_id, meta, vcf, tbi] }
             .join(

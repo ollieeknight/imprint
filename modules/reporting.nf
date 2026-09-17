@@ -9,8 +9,6 @@ def jsonSafe(value) {
     }
     if (value instanceof Collection) return value.collect { item -> jsonSafe(item) }
     if (value.getClass().isArray()) return value.toList().collect { item -> jsonSafe(item) }
-    // Nextflow params commonly contain Path, Duration, MemoryUnit and other
-    // configuration value types that JsonOutput cannot serialise directly.
     value.toString()
 }
 

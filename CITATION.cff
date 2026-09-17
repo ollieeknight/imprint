@@ -16,16 +16,15 @@ authors:
     family-names: Knight
     email: oliver.knight@charite.de
     affiliation: Charité – Universitätsmedizin Berlin
-    # orcid: 'https://orcid.org/0000-0000-0000-0000'  # TODO: add before release
+    orcid: 'https://orcid.org/0000-0002-0424-2379'
 repository-code: https://github.com/ollieeknight/imprint
 license: MIT
 version: 0.1.0
 date-released: '2026-09-11'
-# doi: added after Zenodo mints the record for this release.
+doi: https://doi.org/10.5281/zenodo.22709398
 keywords:
   - somatic variant calling
-  - clonal haematopoiesis
-  - immune cell populations
-  - duplex sequencing
+  - whole exome sequencing
+  - whole genome sequencing
   - nextflow
   - bioinformatics

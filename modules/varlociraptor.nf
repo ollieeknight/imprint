@@ -97,8 +97,6 @@ process VARLOCIRAPTOR_MERGE {
     tuple val(meta), path("${meta.pair_id}.somatic.vcf.gz"), path("${meta.pair_id}.somatic.vcf.gz.tbi"), emit: vcf
 
     script:
-    // Varlociraptor represents deletions >50 bp as <DEL>; recover their explicit
-    // alleles from the unchanged candidate/VEP VCF using CHROM, POS and SVLEN.
     """
     fields='PROB_SOMATIC_TUMOR_LOW,PROB_SOMATIC_TUMOR_HIGH,PROB_SHARED_CLONAL,PROB_SOMATIC_NORMAL_ONLY,PROB_GERMLINE_HET,PROB_GERMLINE_HET_GAIN,PROB_GERMLINE_HOM,PROB_ABSENT,PROB_ARTIFACT'
     columns=\$(printf 'INFO/%s,' \${fields//,/ })

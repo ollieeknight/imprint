@@ -34,7 +34,6 @@ workflow CHARACTERISATION {
         def run_mixcr   = isExtraEnabled('mixcr')
         def run_telseq  = isExtraEnabled('telseq')
 
-        // HLA and KIR use donor-level BAMs.
         if (run_hla || run_kir) {
             MERGE_DONOR_BAMS(ch_all_bams_per_donor)
             ch_donor_bams_split = MERGE_DONOR_BAMS.out.bam.multiMap { meta, bam, bai ->
@@ -56,19 +55,17 @@ workflow CHARACTERISATION {
             )
         }
 
-        // PathSeq uses sample BAMs.
         if (run_pathseq) {
             PATHSEQ(ch_bams, ch_pathseq_references)
         }
 
-        // MiXCR repertoire.
         if (run_mixcr) {
             def ch_mixcr_license = params.mixcr_license ? file(params.mixcr_license) : file('NO_FILE')
             MIXCR(ch_trimmed_reads, ch_mixcr_license)
             MIXCR_EXPORT_CLONES(MIXCR.out.clns, ch_mixcr_license)
         }
 
-        // TelSeq.
+
         if (run_telseq) {
             ch_merged_bam
                 .map { meta, bam, bai -> [meta.id, meta, bam, bai] }

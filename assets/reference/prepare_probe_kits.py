@@ -2,7 +2,6 @@
 import os
 import argparse
 
-# Used only when no FAI is supplied.
 GRCH38_CANONICAL_SIZES = {
     'chr1': 248956422,
     'chr2': 242193529,
@@ -41,7 +40,6 @@ CHROM_ORDER = {
 }
 
 def parse_fai(fai_path):
-    """Read chromosome sizes from a FASTA index."""
     if not fai_path:
         print("[*] No FAI supplied. Using built-in GRCh38 sizes.")
         return GRCH38_CANONICAL_SIZES.copy()
@@ -69,7 +67,6 @@ def parse_fai(fai_path):
     return sizes
 
 def read_bed_regions(bed_path, canonical_chrs):
-    """Read (chrom, start, end) intervals on canonical chromosomes."""
     regions = []
     if not os.path.isfile(bed_path):
         raise FileNotFoundError(f"BED file not found: {bed_path}")
@@ -100,7 +97,6 @@ def read_bed_regions(bed_path, canonical_chrs):
     return regions
 
 def pad_and_merge_regions(regions, pad_size, chrom_sizes):
-    """Pad regions and merge overlapping or adjacent intervals."""
     if not regions:
         return []
 
@@ -143,11 +139,9 @@ def pad_and_merge_regions(regions, pad_size, chrom_sizes):
     return merged_regions
 
 def sort_regions(regions):
-    """Sort by canonical chromosome order, then coordinates."""
     return sorted(regions, key=lambda x: (CHROM_ORDER.get(x[0], 99), x[1], x[2]))
 
 def write_bed(regions, output_path):
-    """Write a three-column BED without a header."""
     out_dirname = os.path.dirname(output_path)
     if out_dirname:
         os.makedirs(out_dirname, exist_ok=True)
@@ -159,7 +153,6 @@ def write_bed(regions, output_path):
     print(f"Wrote {len(regions)} regions.")
 
 def process_kit(kit_name, tasks, bed_dir, out_dir, chrom_sizes):
-    """Prepare the requested target and bait files for one kit."""
     print(f"\nProcessing {kit_name}")
     for task in tasks:
         input_file = os.path.join(bed_dir, task['input'])
@@ -197,10 +190,8 @@ def main():
     bed_dir = os.path.abspath(args.bed_dir)
     out_dir = os.path.abspath(args.out_dir) if args.out_dir else bed_dir
     
-    # Resolve the 'original' folder path for input
     original_dir = os.path.join(bed_dir, "original")
     if not os.path.exists(original_dir):
-        # Fallback to bed_dir directly if no 'original' directory exists
         original_dir = bed_dir
         print(f"[*] 'original' subdirectory not found in {bed_dir}. Reading from {bed_dir} directly.")
     else:
@@ -208,10 +199,8 @@ def main():
         
     print(f"[*] Processed outputs will be written to: {out_dir}")
 
-    # Load sizes
     chrom_sizes = parse_fai(args.fai)
 
-    # 1. Agilent v6 tasks
     v6_tasks = [
         {
             'input': 'S07604514/S07604514_Regions.bed',
@@ -230,7 +219,6 @@ def main():
         }
     ]
 
-    # 2. Agilent v8 tasks
     v8_tasks = [
         {
             'input': 'S33266436/S33266436_Regions.bed',
@@ -249,7 +237,6 @@ def main():
         }
     ]
 
-    # 3. Agilent v7 tasks (S31285117)
     v7_tasks = [
         {
             'input': 'S31285117/S31285117_Regions.bed',
@@ -268,7 +255,6 @@ def main():
         }
     ]
 
-    # 4. Twist Exome 2.0 tasks
     twist_tasks = [
         {
             'input': 'twist_exome_2.0/hg38_exome_v2.0.2_targets_sorted_validated.re_annotated.bed',
@@ -288,7 +274,6 @@ def main():
         }
     ]
 
-    # 5. IDT xGen Exome Hyb Panel v2 tasks
     xgen_exome_v2_tasks = [
         {
             'input': 'xGen_exome_hyb_panel_v2/xgen-exome-hyb-panel-v2-targets-hg38.bed',

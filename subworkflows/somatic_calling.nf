@@ -9,10 +9,6 @@ workflow SOMATIC_CALLING {
         ch_paired_bams // [meta, tumor_bam, tumor_bai, normal_bam, normal_bai]
 
     main:
-        // 0. Prepare compressed intervals for Manta and Strelka2
-        // In WGS mode: Manta/Strelka2 run genome-wide (no --callRegions); provide a dummy
-        // channel so downstream processes still receive two path values (scripts check params.genome).
-        // In WES mode: compress the calling BED (padded in off-target mode, standard otherwise).
         def effective_bed = params.off_target ? params.padded_intervals_bed : params.intervals_bed
         if (params.dupcaller) {
             ch_intervals_gz = channel.empty()
@@ -27,12 +23,9 @@ workflow SOMATIC_CALLING {
             ch_intervals_bed_split = channel.value(file(effective_bed))
         }
 
-        // 0b. Split intervals for scatter-gather (Mutect2 only)
-        // Genome mode uses NO_FILE and genome_scatter_count.
         SPLIT_INTERVALS(ch_intervals_bed_split)
         ch_split_source = SPLIT_INTERVALS.out
 
-        // Collect interval pairs with their count.
         def ch_intervals_with_count = ch_split_source.intervals_gz
             .flatten()
             .map { f -> [f.simpleName, f] }
@@ -50,21 +43,17 @@ workflow SOMATIC_CALLING {
                 pairs.collect { pair -> [pair[0], pair[1], count] }
             }
 
-        // Use the same recalibrated BAMs for bulk calling and read-evidence annotation.
         if (!params.skip_bqsr) {
-            // Tumour: one entry per pair
             ch_paired_bams
                 .map { meta, tb, tbai, _nb, _nbai -> [meta, 'tumour', meta.tumor_id, tb, tbai] }
                 .set { ch_tumour_for_bqsr }
 
-            // Normal: deduplicate to 1 per donor (BQSR output is pair-independent)
             ch_paired_bams
                 .map { meta, _tb, _tbai, nb, nbai -> [meta.normal_id, meta, nb, nbai] }
                 .groupTuple(by: 0)
                 .map { normal_id, metas, nbams, nbais -> [metas[0], 'normal', normal_id, nbams[0], nbais[0]] }
                 .set { ch_normal_for_bqsr }
 
-            // Each tumour pair needs its donor's recalibrated normal BAM.
             ch_normal_for_bqsr.mix(ch_tumour_for_bqsr).set { ch_bams_for_bqsr }
 
             BASE_RECALIBRATOR(ch_bams_for_bqsr)
@@ -93,7 +82,6 @@ workflow SOMATIC_CALLING {
                 }
                 .set { ch_bqsr_bams }
 
-            // Fan deduplicated normal back to each tumour pair
             ch_bqsr_bams.tumour
                 .map { meta, _role, _sample_id, tb, tbai -> [ meta.donor, meta, tb, tbai ] }
                 .combine(
@@ -111,7 +99,6 @@ workflow SOMATIC_CALLING {
             ch_bqsr_recal = channel.empty()
         }
 
-        // Fan out recalibrated BAMs, or analysis BAMs when BQSR is off.
         def ch_calling_bams = ch_paired_bams_for_mutect2.multiMap { meta, tb, tbai, nb, nbai ->
             mutect2:     [meta, tb, tbai, nb, nbai]
             strelka2:    [meta, tb, tbai, nb, nbai]
@@ -129,11 +116,9 @@ workflow SOMATIC_CALLING {
 
         STRELKA2(ch_calling_bams.strelka2, ch_intervals_gz)
 
-        // DeepSomatic requires a GPU and contributes to the PASS union.
         DEEPSOMATIC(ch_calling_bams.deepsomatic)
 
     emit:
-        // VAFATOR and VarLociraptor use the same BAMs as the callers.
         calling_bams    = ch_calling_bams.annotation
         mutect2_vcf     = MUTECT2.out.vcf
         mutect2_raw_vcf = MUTECT2.out.raw_vcf

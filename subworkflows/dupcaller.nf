@@ -10,8 +10,6 @@ workflow DUPCALLER {
             def noiseMasks = params.dupcaller_noise_masks instanceof Collection
                 ? params.dupcaller_noise_masks.findAll { item -> item }
                 : (params.dupcaller_noise_masks ? params.dupcaller_noise_masks.toString().tokenize(',').collect { item -> item.trim() }.findAll { item -> item } : [])
-            // DUPCALLER_CALL takes a fixed number of path inputs, so an unconfigured
-            // mask or ePoN stages a small stand-in file that the process then ignores.
             def stagedNoiseMasks = noiseMasks ? noiseMasks.collect { mask -> file(mask) } : [file(params.dupcaller_umi_allowlist)]
             def stagedNoiseIndexes = noiseMasks ? noiseMasks.collect { mask -> file("${mask}.tbi") } : [file("${projectDir}/bin/validate_dupcaller_tags.awk")]
             def maxZeroQualFraction = params.dupcaller_max_zero_qual_fraction != null
@@ -48,13 +46,10 @@ workflow DUPCALLER {
                 file(params.dupcaller_dbs_h5)
             )
 
-            // summarize reads each pair's merged call + burden directory and takes the
-            // sample name from its basename, so the directories go in whole.
             DUPCALLER_SUMMARIZE(
                 DUPCALLER_ESTIMATE.out.sample_dir.map { _meta, dir -> dir }.collect()
             )
 
-            // Annotate PASS callsets with VEP, preserving DupCaller INFO/FORMAT fields.
             def ch_vep_input = DUPCALLER_CALL.out.calls.flatMap { meta, dir ->
                 [['sbs', "SBS/${meta.pair_id}_sbs.vcf.gz"],
                  ['indel', "INDEL/${meta.pair_id}_indel.vcf.gz"]].collect { mutation_type, relative ->

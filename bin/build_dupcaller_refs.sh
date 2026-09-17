@@ -1,10 +1,8 @@
 #!/usr/bin/env bash
-# Build DupCaller repeat, h5 and gene references. Existing outputs are retained.
 set -euo pipefail
 
 REF_ROOT=${REF_ROOT:-/sc-projects/sc-proj-cc12-ag-romagnani/ref/imprint}
 CONTAINER=${CONTAINER:-/sc-scratch/sc-scratch-cc12-ag-romagnani/apptainer_cache/dupcaller_1.1.2-dev53eb785.sif}
-# PERF is a separate pip package; it is not in the DupCaller image.
 PERF_PYTHON=${PERF_PYTHON:-python3}
 THREADS=${THREADS:-${SLURM_CPUS_PER_TASK:-16}}
 
@@ -32,10 +30,6 @@ run_apptainer() {
     fi
     apptainer exec "${bind_opts[@]}" "$CONTAINER" "$@"
 }
-
-# --- repeats -----------------------------------------------------------------
-#
-# PERF uses `-u 2` to retain short, low-copy repeats. Homopolymers come from FASTA.
 
 do_repeats() {
     [[ -s $REPEAT_TSV ]] && { log "have $REPEAT_TSV"; return; }
@@ -134,14 +128,10 @@ PY
     note repeats "source: $FASTA" "command: PERF.core -m 1 -M 10 -u 2 (parallel $n_threads workers)" "output: $REPEAT_TSV"
 }
 
-# --- index -------------------------------------------------------------------
-
 do_index() {
     [[ -s $FASTA.dbs.h5 ]] && { log "have $FASTA.dbs.h5"; return; }
     [[ -s $REPEAT_TSV ]] || die "run the repeats step first"
 
-    # DupCaller writes the h5 beside whichever FASTA it is given. Build through a
-    # staging symlink so a failed run cannot destroy a working index.
     local stage=$REF_ROOT/udseq/.index_staging fa
     rm -rf "$stage"; mkdir -p "$stage"
     fa=$stage/$(basename "$FASTA")
@@ -157,15 +147,7 @@ do_index() {
     note index "reference: $FASTA" "repeat tsv: $REPEAT_TSV" "container: $CONTAINER"
 }
 
-# --- genes -------------------------------------------------------------------
-#
-# DupCaller cuts column 4 at the first underscore to get the gene name
-# (Estimate.py: gene_exon.split("_")[0]), so symbols containing one are rewritten.
-# Per-gene depth is sum(coverage)/sum(exon lengths), so overlapping exons from
-# different transcripts are merged per gene. Exons are clipped to the targets:
-# off-panel bases add zero coverage but would still inflate the denominator.
-
-exons_from_gtf() {  # GTF on stdin -> BED4; GTF is 1-based inclusive
+exons_from_gtf() {
     awk -F'\t' 'BEGIN{OFS="\t"}
         $3=="exon" && $9~/gene_type "protein_coding"/ {
             match($9, /gene_name "[^"]+"/); if (!RSTART) next
@@ -174,7 +156,7 @@ exons_from_gtf() {  # GTF on stdin -> BED4; GTF is 1-based inclusive
         }'
 }
 
-merge_per_gene() {  # input sorted by chrom, gene, start
+merge_per_gene() {
     awk -F'\t' 'BEGIN{OFS="\t"}
         NR==1 { c=$1; s=$2; e=$3; g=$4; next }
         $1==c && $4==g && $2<=e { if ($3>e) e=$3; next }
@@ -201,9 +183,6 @@ do_genes() {
     note genes "annotation: $GTF" "targets: $TARGETS" \
         "rules: protein_coding exons, clipped to targets, merged per gene" "output: $GENE_BED"
 }
-
-# --- verify ------------------------------------------------------------------
-# Check h5 contents, BGZF and INFO/AF.
 
 check_h5() {
     run_apptainer python - "$1" <<'PY'
@@ -245,7 +224,6 @@ do_verify() {
     done
     for f in "$GENE_BED" "${noise_files[@]}"; do
         [[ -s $f && -s $f.tbi ]] || { printf '  MISS  %s (+.tbi)\n' "$f"; rc=1; continue; }
-        # pysam fetch needs BGZF; plain gzip passes -s and fails at read time
         file "$f" | grep -q BGZF && printf '  OK    %s\n' "$(basename "$f")" \
             || { printf '  BAD   not BGZF: %s\n' "$f"; rc=1; }
     done
@@ -260,11 +238,7 @@ do_verify() {
     return $rc
 }
 
-# --- self-test ---------------------------------------------------------------
-
 self_test() {
-    # overlapping exons of one gene, a symbol that split("_") would truncate,
-    # and a non-coding gene that must be dropped
     local got want
     got=$(printf '%s\n' \
         'chr1	HAVANA	exon	101	200	.	+	.	gene_type "protein_coding"; gene_name "TP53";' \
@@ -281,14 +255,11 @@ self_test() {
     echo "self-test OK"
 }
 
-# --- main --------------------------------------------------------------------
-
 case ${1:-} in
     --self-test) self_test; exit ;;
     -h|--help) die "usage: $(basename "$0") [--self-test] [str|index|genes|verify ...]" ;;
 esac
 
-# unquoted on purpose: quoting collapses the default into a single word
 for step in ${@:-repeats index genes verify}; do
     log "=== $step"
     "do_$step"

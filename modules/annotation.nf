@@ -9,7 +9,7 @@ process STRELKA2_MERGE {
     tuple val(meta), path(snv_vcf), path(snv_tbi), path(indel_vcf), path(indel_tbi)
 
     output:
-    tuple val(meta), path("${meta.pair_id}.strelka2.all.vcf.gz"),     path("${meta.pair_id}.strelka2.all.vcf.gz.tbi"),     emit: all_vcf
+    tuple val(meta), path("${meta.pair_id}.strelka2.all.vcf.gz"), path("${meta.pair_id}.strelka2.all.vcf.gz.tbi"), emit: all_vcf
 
     script:
     """
@@ -144,9 +144,6 @@ process TUMOR_NORMAL_FILTER {
     tuple val(meta), path("${meta.pair_id}.somatic_filtered.vcf.gz"), path("${meta.pair_id}.somatic_filtered.vcf.gz.tbi"), emit: vcf
 
     script:
-    // No statistical filtering here: no AC, depth or VAF gates. This marks
-    // ON_TARGET in off-target mode and keeps PASS records only. Caller INFO
-    // fields are preserved; study filters are applied downstream in R.
     """
     bgzip -c "${vaf_vcf}" > input.vcf.gz
     tabix -p vcf input.vcf.gz
@@ -173,7 +170,6 @@ process VEP_ANNOTATE {
     label 'process_high_memory'
     tag "${meta.pair_id}"
     container "${params.container_vep}"
-    // VARLOCIRAPTOR_MERGE publishes bulk annotations after adding PROB_* fields.
     publishDir { "${params.outdir}/${meta.donor}/pairs/${meta.pair_dir}/dupcaller/annotated" },
         mode: 'copy', enabled: params.dupcaller
 
@@ -236,8 +232,6 @@ process VEP_ANNOTATE {
         ${custom_flags} \\
         --fork ${task.cpus}
 
-    # gnomAD fields are annotations only. Population-frequency filtering is
-    # intentionally deferred to downstream R analysis.
     mv "${meta.pair_id}.vep.vcf.gz" "${meta.pair_id}.${mutation_type}.vcf.gz"
     tabix -f -p vcf "${meta.pair_id}.${mutation_type}.vcf.gz"
     """

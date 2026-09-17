@@ -137,10 +137,6 @@ for cell in "${cells[@]}"; do
     [[ ${status[$cell]} == 1 ]] || normal=$cell
 done
 
-# Realign bulk FASTQs to the NUMT-hardmasked reference using the steps in
-# modules/align.nf. Keep the settings in sync if changing the nuclear pipeline:
-# optical duplicate distance is fixed at 2500 here, with no front trimming.
-# This script does not trim or tag duplex UMIs and must not be used for DupCaller runs.
 echo "Processing $donor (normal: $normal)"
 for cell in "${cells[@]}"; do
     sample=${donor}_${cell}

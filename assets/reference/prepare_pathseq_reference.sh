@@ -40,8 +40,6 @@ grep -Fq "${GATK_VERSION_REQUIRED}" <<< "${gatk_version}" || \
 
 mkdir -p "${OUTDIR}"/{host,microbe,taxonomy}
 
-# Refuse to mix a partial previous build with newly generated files. Move the
-# host/, microbe/, and taxonomy/ outputs aside before intentionally rebuilding.
 for output in \
     "${HOST_NO_EBV}" "${HOST_NO_EBV}.fai" "${HOST_NO_EBV_IMG}" "${HOST_NO_EBV_HSS}" \
     "${MICROBE_FASTA}" "${MICROBE_FASTA}.fai" "${MICROBE_DICT}" "${MICROBE_IMG}" \
@@ -68,9 +66,6 @@ host_contigs="$(wc -l < "${HOST_NO_EBV}.fai")"
     die "PathSeq host reference did not remove exactly one contig"
 grep -q "^${ebv_contig}"$'\t' "${HOST_NO_EBV}.fai" && die "${ebv_contig} remains in PathSeq host reference"
 
-# NCBI defines --host as the organism from which the submitted sequence was
-# isolated. This is the reproducible NCBI-supported proxy for human-infecting
-# viruses; the EBV and CMV checks below guard the required herpesvirus coverage.
 log "Downloading NCBI RefSeq viral genomes isolated from human hosts"
 datasets download virus genome \
     taxon 10239 \
@@ -134,12 +129,3 @@ done
 
 rm -rf -- "${build_tmp}"
 trap - EXIT
-
-log "PathSeq references built successfully"
-log "Host FAI:       ${HOST_NO_EBV}.fai"
-log "Host image:     ${HOST_NO_EBV_IMG}"
-log "Host k-mer set: ${HOST_NO_EBV_HSS}"
-log "Viral FAI:      ${MICROBE_FASTA}.fai"
-log "Viral image:    ${MICROBE_IMG}"
-log "Viral dict:     ${MICROBE_DICT}"
-log "Taxonomy DB:    ${TAXONOMY_DB}"
