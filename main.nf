@@ -16,7 +16,6 @@ include { EMIT_OUTPUT_MANIFEST; EMIT_PROVENANCE } from './modules/reporting'
 def preflight_samplesheet(String path) {
     def required = ['patient', 'cell_type', 'status', 'fastq_1', 'fastq_2']
     def parser = new nextflow.util.CsvParser().setSeparator(',').setQuote('"').setStrip(true)
-    // Filter out trailing/empty whitespace lines
     def lines = new File(path).readLines().findAll { v -> !v.trim().isEmpty() }
     if (lines.isEmpty()) error "Samplesheet is empty: ${path}"
 
@@ -54,7 +53,6 @@ def preflight_samplesheet(String path) {
         }
     }
 
-    // Re-sequencing rows must point to distinct FASTQ pairs.
     rows.groupBy { r -> "${r.patient}_${r.cell_type}_${r.status}" }.each { key, group ->
         def seen = group.collect { r -> "${r.fastq_1}\u0000${r.fastq_2}" }
         if (seen.size() != seen.unique().size())
@@ -71,16 +69,12 @@ def preflight_samplesheet(String path) {
         error "FASTQ is assigned more than once (${owners.join(', ')}): ${fastqPath}"
     }
 
-    // A cell type is one biological sample and cannot be both tumour and normal.
     rows.groupBy { r -> "${r.patient}\u0000${r.cell_type}" }.each { key, group ->
         def statuses = group.collect { r -> r.status }.unique()
         if (statuses.size() > 1)
             error "Sample ${key.replace('\u0000', '_')} has conflicting status values: ${statuses.join(', ')}"
     }
 
-    // Each patient must have exactly one distinct normal sample (status=0).
-    // Repeated rows for the same patient + cell_type + status are re-sequencing
-    // runs of that sample and are merged before duplicate marking.
     rows.groupBy { r -> r.patient }.each { patient, patRows ->
         def normals = patRows
             .findAll { r -> r.status == '0' }
@@ -117,7 +111,6 @@ def requireIndexedVcf(String name, value) {
 }
 
 def dupcallerVersion() {
-    // Read the DupCaller version from its pinned image name for the manifest.
     def version = (params.container_dupcaller.toString() =~ /(\d+\.\d+\.\d+)/)
     if (!version)
         error "Cannot read a DupCaller version from container_dupcaller: ${params.container_dupcaller}. Include the version in the image tag or filename."
@@ -125,8 +118,6 @@ def dupcallerVersion() {
 }
 
 def effectiveMaxZeroQualFraction() {
-    // A configured noise mask lets DupCaller tolerate a higher zero-quality fraction;
-    // without one, its own recommended default applies.
     params.dupcaller_max_zero_qual_fraction != null
         ? params.dupcaller_max_zero_qual_fraction
         : (listParam(params.dupcaller_noise_masks) ? 0.5 : 0.1)
@@ -182,7 +173,6 @@ def pairManifestRecord(meta, String kind, String path) {
     ]
 }
 
-// DupCaller manifest records come from the emitted calls and burden directories.
 def dupcallerManifestRecords(meta, dir, String kindPrefix, String publishRoot) {
     def records = []
     dir.eachFileRecurse(groovy.io.FileType.FILES) { produced ->
@@ -255,13 +245,11 @@ workflow {
         error "WGS and DupCaller are not supported together"
     def selectedProfiles = workflow.profile?.tokenize(',')?.collect { profile -> profile.trim() } ?: []
     def selectedKits = selectedProfiles.findAll { profile -> profile in ['agilent_v6', 'agilent_v7', 'agilent_v8', 'twist_v2', 'xgen_exome_v2', 'wgs'] }
-    // Command-line params arrive as strings, so validate the text and coerce.
     if (!(params.trim_front.toString() ==~ /\d+/))
         error "trim_front must be a non-negative whole number, got: ${params.trim_front}"
     def trimFront = params.trim_front as Integer
     if (trimFront > 0)
         log.info "Trimming ${trimFront} bp from the 5' end of both reads; aligned reads are ${trimFront} bp shorter than sequenced"
-    // DupCaller reads raw FASTQs and trims its own UMIs.
     if (params.dupcaller && trimFront != 0)
         error "trim_front applies to the bulk path only; DupCaller mode trims its own UMIs in DUPCALLER_TRIM_LANE"
     if (params.dupcaller && selectedKits != ['xgen_exome_v2'])
@@ -276,7 +264,6 @@ workflow {
     def startupAssayLabel = params.genome ? 'WGS' : (params.off_target ? 'WES off-target' : 'WES target-only')
     log.info "imprint: ${effectiveLibraryMode}, ${startupAssayLabel}${params.kit_name ? ' [' + params.kit_name + ']' : ''}"
     
-    // Validate resources before submitting work to the cluster.
     requireFileParam('ref_fasta', params.ref_fasta)
     requireFileParam('genome_fai', params.genome_fai)
     requireFileParam('ref_dict', params.ref_dict)
@@ -317,7 +304,6 @@ workflow {
         requireIndexedVcf('gnomad_germline_resource_vcf', params.gnomad_germline_resource_vcf)
         requireIndexedVcf('gnomad_pileup_summaries_vcf', params.gnomad_pileup_summaries_vcf)
     }
-    // VEP annotates both the bulk ensemble and the DupCaller SBS/indel callsets.
     requireIndexedVcf('spliceai_snv_vcf', params.spliceai_snv_vcf)
     requireIndexedVcf('gnomad_exomes_vep_vcf', params.gnomad_exomes_vep_vcf)
     requireIndexedVcf('gnomad_genomes_vep_vcf', params.gnomad_genomes_vep_vcf)
@@ -328,15 +314,12 @@ workflow {
     requireFileParam('multiqc_config', params.multiqc_config)
     if (!params.dupcaller) {
         requireIndexedVcf('pon_vcf', params.pon_vcf)
-        // PER_BASE_ERROR_RATE masks known sites with dbSNP whether or not BQSR runs.
         requireIndexedVcf('dbsnp', params.dbsnp)
     }
     if (!params.dupcaller && !params.skip_bqsr) {
         requireIndexedVcf('known_indels_mills', params.known_indels_mills)
         requireIndexedVcf('known_snps_1000g', params.known_snps_1000g)
     }
-    // DupCaller must never recalibrate: raw duplex families carry the error model
-    // DupCaller itself estimates, and BQSR would overwrite the qualities it reads.
     if (params.dupcaller && !params.skip_bqsr)
         error "dupcaller mode requires skip_bqsr = true; base recalibration is not permitted before DupCaller"
     if (params.cosmic_vcf) requireIndexedVcf('cosmic_vcf', params.cosmic_vcf)
@@ -362,10 +345,6 @@ workflow {
     if (run_hla) requireFileParam('hla_reference', params.hla_reference)
     if (run_kir) requireDirectoryParam('kirmapper_db', params.kirmapper_db)
 
-    // The primary alignment reference retains chrEBV, while the secondary
-    // host-subtraction reference is exactly that assembly minus chrEBV. This lets
-    // --ignore-alignment-contigs chrEBV rescue EBV-aligned reads without weakening
-    // subtraction against any human contig.
     def ch_pathseq_references = channel.empty()
     if (run_pathseq) {
         def pathseqReferences = [
@@ -411,7 +390,6 @@ workflow {
 
     // Exome-only preflight checks
     if (!params.genome) {
-        // Determine effective calling intervals (padded BED in off-target mode, regular BED otherwise)
         if (params.off_target) {
             if (params.padded_intervals_bed == null)
                 error "--off_target requires --padded_intervals_bed. Provide the kit padded BED (e.g. S07604514_Padded.bed)."
@@ -435,7 +413,6 @@ workflow {
     if (params.genome && params.verifybamid2_svd_wgs == null)
         error "VerifyBamID2 WGS SVD panel is not configured"
 
-    // groupKey needs donor cardinality before BAMs enter the channel graph.
     def donor_sample_counts = file(params.samplesheet)
         .splitCsv(header: true, strip: true)
         .groupBy { row -> row.patient }
@@ -443,7 +420,6 @@ workflow {
             [donor, rows.collect { r -> "${r.patient}_${r.cell_type}" }.unique().size()]
         }
 
-    // A cohort PoN needs at least two normal samples.
     def normal_count = file(params.samplesheet)
         .splitCsv(header: true, strip: true)
         .findAll { row -> row.status == '0' }
@@ -485,7 +461,6 @@ workflow {
     def effectiveIntervals = params.genome ? null : (params.off_target ? params.padded_intervals_bed : params.intervals_bed)
     def effectiveScatterCount = params.genome ? (params.genome_scatter_count ?: 50) : params.wes_scatter_count
 
-    // Record settings used by this run.
     def effectiveParams = [
         samplesheet             : params.samplesheet,
         outdir                  : params.outdir,
@@ -613,7 +588,6 @@ workflow {
 
     ALIGN(ch_fastq)
 
-    // Keep the downstream routes named while their contracts are tested independently.
     def ch_analysis_bam_split = ALIGN.out.analysis_bam.multiMap { meta, bam, bai ->
         qc:               [meta, bam, bai]
         donor_merge:      [meta, bam, bai]
@@ -625,7 +599,6 @@ workflow {
         characterisation: [id, short_inserts, read_length]
     }
 
-    // Alignment and QC settings for MultiQC.
     def cfg = [
         cohort_name              : params.cohort_name,
         kit_name                 : params.kit_name              ?: 'unknown',
@@ -679,7 +652,6 @@ ${yaml_rows}
             } else if (clean.sex == '2') {
                 sex = 'XX'
             } else {
-                // Use normalised Y/autosomal depth rather than absolute Y coverage.
                 def y_depth   = (clean.Y_depth_mean ?: '0').toFloat()
                 def mean_depth = (clean.depth_mean   ?: '0').toFloat()
                 def y_norm    = (mean_depth > 0) ? y_depth / mean_depth : null
@@ -705,14 +677,12 @@ ${yaml_rows}
             normal: meta.status == '0'
         }
 
-    // Keep pairing and cohort-PoN inputs as distinct routes.
     def ch_normal_split = branch_bams.normal
         .multiMap { meta, bam, bai ->
             pairing:  [meta, bam, bai]
             pon:      [meta, bam, bai]
         }
 
-    // Add fastp insert metrics to tumour metadata.
     def ch_tumour_enriched = branch_bams.tumour
         .map { meta, bam, bai -> [meta.id, meta, bam, bai] }
         .join(ch_fastp_stats_split.pairing)
@@ -720,7 +690,6 @@ ${yaml_rows}
             [meta + [short_inserts: short_inserts, read_length: read_length], bam, bai]
         }
 
-    // Pair metadata supplies downstream identifiers and output fields.
     def ch_paired_bams = ch_tumour_enriched
         .map { meta, bam, bai -> [ meta.donor, meta, bam, bai ] }
         .combine(
