@@ -1,8 +1,5 @@
 #!/usr/bin/env nextflow
 
-nextflow.enable.dsl = 2
-
-
 include { ALIGN }          from './subworkflows/align'
 include { QC }             from './subworkflows/qc'
 include { SOMATIC_CALLING }  from './subworkflows/somatic_calling'
@@ -87,6 +84,10 @@ def preflight_samplesheet(String path) {
     }
 }
 
+def asList(value) {
+    (value instanceof Collection) ? value : [value]
+}
+
 def readFai(String path) {
     file(path).readLines().collectEntries { line ->
         def fields = line.split('\t')
@@ -108,13 +109,6 @@ def requireIndexedVcf(String name, value) {
     requireFileParam(name, value)
     if (!file("${value}.tbi").exists())
         error "Index for '${name}' not found: ${value}.tbi"
-}
-
-def dupcallerVersion() {
-    def version = (params.container_dupcaller.toString() =~ /(\d+\.\d+\.\d+)/)
-    if (!version)
-        error "Cannot read a DupCaller version from container_dupcaller: ${params.container_dupcaller}. Include the version in the image tag or filename."
-    return version[0][1]
 }
 
 def effectiveMaxZeroQualFraction() {
@@ -188,6 +182,14 @@ def dupcallerManifestRecords(meta, dir, String kindPrefix, String publishRoot) {
     records.sort { record -> record.path }
 }
 
+// A file and its index, recorded as `kind` and `kind_index`.
+def indexedPairRecords(meta, String kind, String base, data, index) {
+    [
+        pairManifestRecord(meta, kind, "${base}/${data.name}"),
+        pairManifestRecord(meta, "${kind}_index", "${base}/${index.name}")
+    ]
+}
+
 def donorManifestRecord(meta, String kind, String path) {
     [
         scope: 'donor',
@@ -198,31 +200,23 @@ def donorManifestRecord(meta, String kind, String path) {
     ]
 }
 
-
-
 workflow {
 
-    def run_mixcr        = false
-    def run_telseq       = false
-    def run_hla          = false
-    def run_kir          = false
-    def run_pathseq      = false
-
-    if (params.extras) {
-        def _extras = params.extras.tokenize(',').collect { v -> v.trim().toLowerCase() }.findAll { v -> v }.toSet()
-        def _known_extras = [
-            'mixcr', 'telseq', 'hla', 'optitype',
-            'kir', 'kirmapper', 'kir_mapper', 'pathseq'
-        ] as Set
-        def _unknown_extras = _extras - _known_extras
-        if (_unknown_extras)
-            error "Unknown --extras value(s): ${_unknown_extras.sort().join(', ')}"
-        if ('mixcr'        in _extras) run_mixcr        = true
-        if ('telseq'       in _extras) run_telseq       = true
-        if ('hla'          in _extras || 'optitype'     in _extras) run_hla          = true
-        if ('kir'          in _extras || 'kirmapper'    in _extras || 'kir_mapper' in _extras) run_kir = true
-        if ('pathseq'      in _extras) run_pathseq      = true
-    }
+    def extraNames = [
+        mixcr: 'mixcr', telseq: 'telseq', pathseq: 'pathseq',
+        hla: 'hla', optitype: 'hla',
+        kir: 'kir', kirmapper: 'kir', kir_mapper: 'kir',
+    ]
+    def requestedExtras = params.extras ? params.extras.toString().tokenize(',').collect { v -> v.trim().toLowerCase() }.findAll { v -> v } : []
+    def unknownExtras = requestedExtras.findAll { v -> !extraNames.containsKey(v) }.unique().sort()
+    if (unknownExtras)
+        error "Unknown --extras value(s): ${unknownExtras.join(', ')}"
+    def resolved_extras = requestedExtras.collect { v -> extraNames[v] }.unique().sort()
+    def run_mixcr   = 'mixcr' in resolved_extras
+    def run_telseq  = 'telseq' in resolved_extras
+    def run_hla     = 'hla' in resolved_extras
+    def run_kir     = 'kir' in resolved_extras
+    def run_pathseq = 'pathseq' in resolved_extras
 
     def _run_defaults = [
         outdir      : 'imprint_outs',
@@ -263,13 +257,13 @@ workflow {
     def effectiveMode = params.genome ? 'wgs' : (params.off_target ? 'wes_off_target' : 'wes')
     def startupAssayLabel = params.genome ? 'WGS' : (params.off_target ? 'WES off-target' : 'WES target-only')
     log.info "imprint: ${effectiveLibraryMode}, ${startupAssayLabel}${params.kit_name ? ' [' + params.kit_name + ']' : ''}"
-    
+
     requireFileParam('ref_fasta', params.ref_fasta)
     requireFileParam('genome_fai', params.genome_fai)
     requireFileParam('ref_dict', params.ref_dict)
+    if (!file("${params.bwa_mem3_index}.ann").exists())
+        error "BWA-MEM3 index files (.ann) not found at prefix: ${params.bwa_mem3_index}"
     if (params.dupcaller) {
-        if (!file("${params.bwa_mem3_index}.ann").exists())
-            error "BWA-MEM3 index files (.ann) not found at prefix: ${params.bwa_mem3_index}"
         requireFileParam('dupcaller_ref_h5', params.dupcaller_ref_h5)
         requireFileParam('dupcaller_tn_h5', params.dupcaller_tn_h5)
         requireFileParam('dupcaller_hp_h5', params.dupcaller_hp_h5)
@@ -296,8 +290,6 @@ workflow {
         validateDuplexAllowlist(params.dupcaller_umi_allowlist)
         if (params.dupcaller_seed != null && !(params.dupcaller_seed.toString() ==~ /\d+/))
             error "dupcaller_seed must be a non-negative whole number, got: ${params.dupcaller_seed}"
-    } else if (!file("${params.bwa_mem3_index}.ann").exists()) {
-        error "BWA-MEM3 index files (.ann) not found at prefix: ${params.bwa_mem3_index}"
     }
     requireIndexedVcf('somalier_sites', params.somalier_sites)
     if (!params.dupcaller) {
@@ -327,21 +319,14 @@ workflow {
 
     def effectiveSpliceAiMode = params.spliceai_indel_vcf ? 'snv_and_indel' : 'snv_only'
     if (params.spliceai_indel_vcf) {
-        def vcfPath = params.spliceai_indel_vcf
-        if (!file(vcfPath).exists())
-            error "VEP spliceai_indel_vcf not found: ${vcfPath}"
-        if (!file("${vcfPath}.tbi").exists())
-            error "VEP spliceai_indel_vcf index not found: ${vcfPath}.tbi. Create it with: tabix -p vcf ${vcfPath}"
-        if (file(vcfPath).toRealPath() == file(params.spliceai_snv_vcf).toRealPath())
-            error "spliceai_indel_vcf resolves to the SNV resource. Remove the indel-path override for explicit SNV-only annotation, or provide the real Illumina indel VCF."
+        requireIndexedVcf('spliceai_indel_vcf', params.spliceai_indel_vcf)
+        if (file(params.spliceai_indel_vcf).toRealPath() == file(params.spliceai_snv_vcf).toRealPath())
+            error "spliceai_indel_vcf points at the SNV VCF; unset it or give the indel VCF"
     } else {
-        log.warn "SpliceAI is running in SNV-only mode: no indel resource is configured. The SNV VCF will satisfy the plugin's required indel argument, but indels will receive no SpliceAI score."
+        log.warn "No SpliceAI indel VCF configured; indels get no SpliceAI score"
     }
 
-    if (run_mixcr) {
-        if (params.mixcr_license == null) error "--mixcr_license is required when --extras mixcr is set. Provide path to your mi.license file."
-        if (!file(params.mixcr_license).exists()) error "MiXCR licence not found: ${params.mixcr_license}"
-    }
+    if (run_mixcr) requireFileParam('mixcr_license', params.mixcr_license)
     if (run_hla) requireFileParam('hla_reference', params.hla_reference)
     if (run_kir) requireDirectoryParam('kirmapper_db', params.kirmapper_db)
 
@@ -356,10 +341,7 @@ workflow {
             pathseq_microbe_dict: params.pathseq_microbe_dict,
             pathseq_taxonomy    : params.pathseq_taxonomy,
         ]
-        pathseqReferences.each { name, referencePath ->
-            if (referencePath == null || !file(referencePath).exists())
-                error "PathSeq reference '${name}' not found: ${referencePath}"
-        }
+        pathseqReferences.each { name, referencePath -> requireFileParam(name, referencePath) }
 
         def primaryContigs = readFai(params.genome_fai)
         def ebvContig = primaryContigs.keySet().find { c -> c == 'chrEBV' || c == 'EBV' }
@@ -388,26 +370,11 @@ workflow {
         ])
     }
 
-    // Exome-only preflight checks
     if (!params.genome) {
-        if (params.off_target) {
-            if (params.padded_intervals_bed == null)
-                error "--off_target requires --padded_intervals_bed. Provide the kit padded BED (e.g. S07604514_Padded.bed)."
-            if (!file(params.padded_intervals_bed).exists()) error "Padded intervals BED not found: ${params.padded_intervals_bed}"
-        }
         if (params.intervals_bed == null)
-            error "Please provide --intervals_bed (calling target BED). See conf/probekits.config for kit profiles."
-        if (!file(params.intervals_bed).exists()) error "Exome BED not found: ${params.intervals_bed}"
-
-        if (params.bait_intervals == null)
-            error "Please provide --bait_intervals (probe BED). See conf/resources.config for kit options."
-        if (!file(params.bait_intervals).exists())
-            error "Bait intervals BED not found: ${params.bait_intervals}"
-            
-        if (params.target_intervals == null)
-            error "Please provide --target_intervals (target regions BED). See conf/resources.config for kit options."
-        if (!file(params.target_intervals).exists())
-            error "Target intervals BED not found: ${params.target_intervals}"
+            error "No capture intervals set; add a kit profile from conf/probekits.config, e.g. -profile slurm,xgen_exome_v2"
+        def bedParams = ['intervals_bed', 'bait_intervals', 'target_intervals'] + (params.off_target ? ['padded_intervals_bed'] : [])
+        bedParams.each { name -> requireFileParam(name, params[name]) }
     }
 
     if (params.genome && params.verifybamid2_svd_wgs == null)
@@ -452,11 +419,6 @@ workflow {
     def cohort_dir = file("${params.outdir}/cohort")
     cohort_dir.mkdirs()
     file(params.samplesheet).copyTo(cohort_dir.resolve("samplesheet.csv"))
-
-    def resolved_extras = [
-        mixcr: run_mixcr, telseq: run_telseq,
-        hla: run_hla, kir: run_kir, pathseq: run_pathseq
-    ].findAll { _name, enabled -> enabled }.keySet().sort()
 
     def effectiveIntervals = params.genome ? null : (params.off_target ? params.padded_intervals_bed : params.intervals_bed)
     def effectiveScatterCount = params.genome ? (params.genome_scatter_count ?: 50) : params.wes_scatter_count
@@ -588,17 +550,6 @@ workflow {
 
     ALIGN(ch_fastq)
 
-    def ch_analysis_bam_split = ALIGN.out.analysis_bam.multiMap { meta, bam, bai ->
-        qc:               [meta, bam, bai]
-        donor_merge:      [meta, bam, bai]
-        pairing:          [meta, bam, bai]
-        characterisation: [meta, bam, bai]
-    }
-    def ch_fastp_stats_split = ALIGN.out.fastp_stats.multiMap { id, short_inserts, read_length ->
-        pairing:          [id, short_inserts, read_length]
-        characterisation: [id, short_inserts, read_length]
-    }
-
     def cfg = [
         cohort_name              : params.cohort_name,
         kit_name                 : params.kit_name              ?: 'unknown',
@@ -611,7 +562,6 @@ workflow {
         optical_dup_dist         : params.optical_dup_dist,
         trim_front               : trimFront,
     ] + (params.dupcaller ? [
-        dupcaller_version        : dupcallerVersion(),
         barcode_chemistry        : 'xgen_udseq_8bp_umi32',
         dupcaller_mapq           : params.dupcaller_mapq,
         dupcaller_min_normal_depth: params.dupcaller_min_normal_depth,
@@ -634,13 +584,9 @@ ${yaml_rows}
         .collectFile(name: 'pipeline_config_mqc.yaml')
         .set { ch_config_yaml }
 
-    QC(ch_analysis_bam_split.qc, ALIGN.out.reports, ch_config_yaml)
+    QC(ALIGN.out.analysis_bam, ALIGN.out.reports, ch_config_yaml)
 
-    def ch_somalier_split = QC.out.somalier.multiMap { files ->
-        sex: files
-        manifest: files
-    }
-    def ch_sex = ch_somalier_split.sex
+    def ch_sex = QC.out.somalier
         .flatten()
         .filter { f -> f.name.endsWith('.samples.tsv') }
         .splitCsv(header: true, sep: "\t", strip: true)
@@ -661,31 +607,24 @@ ${yaml_rows}
         }
         .toList()
 
-    def ch_all_bams_per_donor = ch_analysis_bam_split.donor_merge
+    // Sorted so the donor merge command, and its -resume hash, is stable.
+    def ch_all_bams_per_donor = ALIGN.out.analysis_bam
         .map { meta, bam, bai -> [ groupKey(meta.donor, meta.donor_sample_count as int), meta, bam, bai ] }
         .groupTuple(by: 0)
         .map { donor_key, _metas, bams, bais ->
-            [ [donor: donor_key.toString()], bams, bais ]
+            def pairs = [bams, bais].transpose().sort { p -> p[0].name }
+            [ [donor: donor_key.toString()], pairs.collect { p -> p[0] }, pairs.collect { p -> p[1] } ]
         }
 
-    def ch_fastp_json     = ALIGN.out.fastp_json
-    def ch_selfsm         = QC.out.selfsm
-
-    def branch_bams = ch_analysis_bam_split.pairing
+    def branch_bams = ALIGN.out.analysis_bam
         .branch { meta, _bam, _bai ->
             tumour: meta.status == '1'
             normal: meta.status == '0'
         }
 
-    def ch_normal_split = branch_bams.normal
-        .multiMap { meta, bam, bai ->
-            pairing:  [meta, bam, bai]
-            pon:      [meta, bam, bai]
-        }
-
     def ch_tumour_enriched = branch_bams.tumour
         .map { meta, bam, bai -> [meta.id, meta, bam, bai] }
-        .join(ch_fastp_stats_split.pairing)
+        .join(ALIGN.out.fastp_stats)
         .map { _id, meta, bam, bai, short_inserts, read_length ->
             [meta + [short_inserts: short_inserts, read_length: read_length], bam, bai]
         }
@@ -693,7 +632,7 @@ ${yaml_rows}
     def ch_paired_bams = ch_tumour_enriched
         .map { meta, bam, bai -> [ meta.donor, meta, bam, bai ] }
         .combine(
-            ch_normal_split.pairing.map { meta, bam, bai -> [ meta.donor, meta, bam, bai ] },
+            branch_bams.normal.map { meta, bam, bai -> [ meta.donor, meta, bam, bai ] },
             by: 0
         )
         .map { donor, tm, tb, tbai, nm, nb, nbai ->
@@ -714,51 +653,31 @@ ${yaml_rows}
     def ch_bulk_paired = params.dupcaller ? channel.empty() : ch_paired_bams
     def ch_dupcaller_paired = params.dupcaller ? ch_paired_bams : channel.empty()
     SOMATIC_CALLING(ch_bulk_paired)
-    DUPCALLER(ch_dupcaller_paired)
+    DUPCALLER(ch_dupcaller_paired, listParam(params.dupcaller_noise_masks), effectiveMaxZeroQualFraction())
 
-    PON_GENERATION(params.dupcaller ? channel.empty() : ch_normal_split.pon, params.dupcaller ? 0 : normal_count)
-    def ch_pon = PON_GENERATION.out.pon
-    def ch_pon_normal_vcf = PON_GENERATION.out.normal_vcf
+    PON_GENERATION(params.dupcaller ? channel.empty() : branch_bams.normal, params.dupcaller ? 0 : normal_count)
 
     CHARACTERISATION(
         ch_all_bams_per_donor,
-        ch_analysis_bam_split.characterisation,
+        ALIGN.out.analysis_bam,
         ALIGN.out.trimmed_reads,
         ALIGN.out.merged_bam,
-        ch_fastp_stats_split.characterisation,
-        ch_pathseq_references
+        ALIGN.out.fastp_stats,
+        ch_pathseq_references,
+        resolved_extras
     )
-
-    def ch_strelka_snv_split = SOMATIC_CALLING.out.strelka_snv.multiMap { meta, vcf, tbi ->
-        annotation: [meta, vcf, tbi]
-        manifest: [meta, vcf, tbi]
-    }
-    def ch_strelka_indel_split = SOMATIC_CALLING.out.strelka_indel.multiMap { meta, vcf, tbi ->
-        annotation: [meta, vcf, tbi]
-        manifest: [meta, vcf, tbi]
-    }
-    def ch_deepsomatic_split = SOMATIC_CALLING.out.deepsomatic_vcf.multiMap { meta, vcf, tbi ->
-        annotation: [meta, vcf, tbi]
-        manifest: [meta, vcf, tbi]
-    }
-    def ch_mutect2_filtered_split = SOMATIC_CALLING.out.mutect2_vcf.multiMap { meta, vcf, tbi ->
-        annotation: [meta, vcf, tbi]
-        manifest: [meta, vcf, tbi]
-    }
 
     ANNOTATION(
         // VAFATOR and VarLociraptor use the calling BAMs.
         params.dupcaller ? channel.empty() : SOMATIC_CALLING.out.calling_bams,
-        ch_mutect2_filtered_split.annotation,
-        ch_strelka_snv_split.annotation,
-        ch_strelka_indel_split.annotation,
-        ch_deepsomatic_split.annotation,
+        SOMATIC_CALLING.out.mutect2_vcf,
+        SOMATIC_CALLING.out.strelka_snv,
+        SOMATIC_CALLING.out.strelka_indel,
+        SOMATIC_CALLING.out.deepsomatic_vcf,
         ch_sex
     )
 
-    def ch_final_vcf = ANNOTATION.out.final_vcf
-
-    // Emitted-output manifest.
+    // output_manifest.json records
     def ch_cram_records = ALIGN.out.cram.flatMap { meta, cram, crai ->
         def base = "${meta.donor}/samples/${meta.cell_type}/alignment"
         [
@@ -767,7 +686,7 @@ ${yaml_rows}
         ]
     }
 
-    def ch_fastp_records = ch_fastp_json.map { meta, json ->
+    def ch_fastp_records = ALIGN.out.fastp_json.map { meta, json ->
         sampleManifestRecord(meta, 'fastp_json', "${meta.donor}/samples/${meta.cell_type}/qc/fastp/${json.name}")
     }
 
@@ -777,22 +696,20 @@ ${yaml_rows}
 
     def ch_mosdepth_records = QC.out.mosdepth_cov.flatMap { meta, files ->
         def base = "${meta.donor}/samples/${meta.cell_type}/qc/mosdepth"
-        def outputFiles = files instanceof Collection ? files : [files]
-        outputFiles.collect { outputFile ->
+        asList(files).collect { outputFile ->
             def kind = outputFile.name.endsWith('.mosdepth.summary.txt') ? 'mosdepth_summary' :
                 (outputFile.name.endsWith('.mosdepth.region.dist.txt') ? 'mosdepth_region_dist' : 'mosdepth')
             sampleManifestRecord(meta, kind, "${base}/${outputFile.name}")
         }
     }
 
-    def ch_selfsm_records = ch_selfsm.map { meta, selfsm ->
+    def ch_selfsm_records = QC.out.selfsm.map { meta, selfsm ->
         sampleManifestRecord(meta, 'selfsm', "${meta.donor}/samples/${meta.cell_type}/qc/verifybamid2/${selfsm.name}")
     }
 
     def ch_riker_records = QC.out.riker_metrics.flatMap { meta, files ->
         def base = "${meta.donor}/samples/${meta.cell_type}/qc/riker"
-        def outputFiles = files instanceof Collection ? files : [files]
-        outputFiles.collect { outputFile ->
+        asList(files).collect { outputFile ->
             def kind = (outputFile.name.endsWith('.hybcap-metrics.txt') || outputFile.name.endsWith('.wgs-metrics.txt')) ?
                 'riker_primary_metrics' : 'riker_metrics'
             sampleManifestRecord(meta, kind, "${base}/${outputFile.name}")
@@ -800,8 +717,7 @@ ${yaml_rows}
     }
 
     def ch_riker_chart_records = QC.out.riker_charts.flatMap { meta, files ->
-        def outputFiles = files instanceof Collection ? files : [files]
-        outputFiles.collect { outputFile ->
+        asList(files).collect { outputFile ->
             sampleManifestRecord(meta, 'riker_chart', "${meta.donor}/samples/${meta.cell_type}/qc/riker/${outputFile.name}")
         }
     }
@@ -843,11 +759,7 @@ ${yaml_rows}
     }
 
     def ch_dupcaller_annotated_records = DUPCALLER.out.annotated.flatMap { meta, mutation_type, vcf, tbi ->
-        def base = "${meta.donor}/pairs/${meta.pair_dir}/dupcaller/annotated"
-        [
-            pairManifestRecord(meta, "dupcaller_annotated_${mutation_type}_vcf", "${base}/${vcf.name}"),
-            pairManifestRecord(meta, "dupcaller_annotated_${mutation_type}_vcf_index", "${base}/${tbi.name}")
-        ]
+        indexedPairRecords(meta, "dupcaller_annotated_${mutation_type}_vcf", "${meta.donor}/pairs/${meta.pair_dir}/dupcaller/annotated", vcf, tbi)
     }
 
     def ch_bqsr_records = SOMATIC_CALLING.out.bqsr_recal.map { meta, role, sample_id, table ->
@@ -886,8 +798,7 @@ ${yaml_rows}
     def ch_mixcr_records = CHARACTERISATION.out.mixcr_clns.map { meta, clns ->
         sampleManifestRecord(meta, 'mixcr_clns', "${meta.donor}/samples/${meta.cell_type}/mixcr/${clns.name}")
     }.mix(CHARACTERISATION.out.mixcr_clonotypes.flatMap { meta, files ->
-            def outputFiles = files instanceof Collection ? files : [files]
-            outputFiles.collect { outputFile ->
+            asList(files).collect { outputFile ->
                 sampleManifestRecord(meta, 'mixcr_clonotypes', "${meta.donor}/samples/${meta.cell_type}/mixcr/${outputFile.name}")
             }
         })
@@ -898,18 +809,15 @@ ${yaml_rows}
             sampleManifestRecord(meta, 'mixcr_report_json', "${meta.donor}/samples/${meta.cell_type}/mixcr/${result.name}")
         })
         .mix(CHARACTERISATION.out.mixcr_step_reports_txt.flatMap { meta, files ->
-            def outputFiles = files instanceof Collection ? files : [files]
-            outputFiles.collect { outputFile ->
+            asList(files).collect { outputFile ->
                 sampleManifestRecord(meta, 'mixcr_step_report', "${meta.donor}/samples/${meta.cell_type}/mixcr/${outputFile.name}")
             }
         })
         .mix(CHARACTERISATION.out.mixcr_step_reports_json.flatMap { meta, files ->
-            def outputFiles = files instanceof Collection ? files : [files]
-            outputFiles.collect { outputFile ->
+            asList(files).collect { outputFile ->
                 sampleManifestRecord(meta, 'mixcr_step_report_json', "${meta.donor}/samples/${meta.cell_type}/mixcr/${outputFile.name}")
             }
         })
-
 
     def ch_hla_records = CHARACTERISATION.out.hla_result.map { meta, result ->
         donorManifestRecord(meta, 'optitype_result', "${meta.donor}/hla/${result.name}")
@@ -929,47 +837,29 @@ ${yaml_rows}
         donorManifestRecord(meta, 'kirmapper_raw_archive', "${meta.donor}/kir/${outputFile.name}")
     })
 
-    def ch_final_call_records = ch_final_vcf.flatMap { meta, vcf, tbi ->
-        def base = "${meta.donor}/pairs/${meta.pair_dir}/variant_calling"
-        [
-            pairManifestRecord(meta, 'ensemble_vcf', "${base}/${vcf.name}"),
-            pairManifestRecord(meta, 'ensemble_vcf_index', "${base}/${tbi.name}")
-        ]
+    def ch_final_call_records = ANNOTATION.out.final_vcf.flatMap { meta, vcf, tbi ->
+        indexedPairRecords(meta, 'ensemble_vcf', "${meta.donor}/pairs/${meta.pair_dir}/variant_calling", vcf, tbi)
     }
 
     def ch_varlociraptor_records = ANNOTATION.out.varlociraptor.flatMap { meta, bcf, csi ->
-        def base = "${meta.donor}/pairs/${meta.pair_dir}/variant_calling/raw"
-        [
-            pairManifestRecord(meta, 'varlociraptor_bcf', "${base}/${bcf.name}"),
-            pairManifestRecord(meta, 'varlociraptor_bcf_index', "${base}/${csi.name}")
-        ]
+        indexedPairRecords(meta, 'varlociraptor_bcf', "${meta.donor}/pairs/${meta.pair_dir}/variant_calling/raw", bcf, csi)
     }
 
     def ch_mutect2_records = SOMATIC_CALLING.out.mutect2_raw_vcf.flatMap { meta, vcf, tbi ->
-        def base = "${meta.donor}/pairs/${meta.pair_dir}/variant_calling/raw"
-        [
-            pairManifestRecord(meta, 'mutect2_vcf', "${base}/${vcf.name}"),
-            pairManifestRecord(meta, 'mutect2_vcf_index', "${base}/${tbi.name}")
-        ]
+        indexedPairRecords(meta, 'mutect2_vcf', "${meta.donor}/pairs/${meta.pair_dir}/variant_calling/raw", vcf, tbi)
     }
 
-    def ch_mutect2_filtered_records = ch_mutect2_filtered_split.manifest.flatMap { meta, vcf, tbi ->
-        def base = "${meta.donor}/pairs/${meta.pair_dir}/variant_calling/raw"
-        [
-            pairManifestRecord(meta, 'mutect2_filtered_vcf', "${base}/${vcf.name}"),
-            pairManifestRecord(meta, 'mutect2_filtered_vcf_index', "${base}/${tbi.name}")
-        ]
+    def ch_mutect2_filtered_records = SOMATIC_CALLING.out.mutect2_vcf.flatMap { meta, vcf, tbi ->
+        indexedPairRecords(meta, 'mutect2_filtered_vcf', "${meta.donor}/pairs/${meta.pair_dir}/variant_calling/raw", vcf, tbi)
     }
 
     def ch_mutect2_contamination_records = SOMATIC_CALLING.out.mutect2_contamination.map { meta, table ->
-        def base = "${meta.donor}/pairs/${meta.pair_dir}/variant_calling/raw"
-        pairManifestRecord(meta, 'mutect2_contamination_table', "${base}/${table.name}")
+        pairManifestRecord(meta, 'mutect2_contamination_table', "${meta.donor}/pairs/${meta.pair_dir}/variant_calling/raw/${table.name}")
     }.mix(SOMATIC_CALLING.out.mutect2_segments.map { meta, table ->
-        def base = "${meta.donor}/pairs/${meta.pair_dir}/variant_calling/raw"
-        pairManifestRecord(meta, 'mutect2_segmentation_table', "${base}/${table.name}")
+        pairManifestRecord(meta, 'mutect2_segmentation_table', "${meta.donor}/pairs/${meta.pair_dir}/variant_calling/raw/${table.name}")
     })
 
-    def ch_pon_normal_records = ch_pon_normal_vcf.flatMap { meta, vcf, tbi ->
+    def ch_pon_normal_records = PON_GENERATION.out.normal_vcf.flatMap { meta, vcf, tbi ->
         def base = 'cohort/pon/normals'
         [
             sampleManifestRecord(meta, 'pon_normal_vcf', "${base}/${vcf.name}"),
@@ -977,42 +867,29 @@ ${yaml_rows}
         ]
     }
 
-    def ch_strelka_records = ch_strelka_snv_split.manifest
-        .mix(ch_strelka_indel_split.manifest)
+    def ch_strelka_records = SOMATIC_CALLING.out.strelka_snv
+        .mix(SOMATIC_CALLING.out.strelka_indel)
         .flatMap { meta, vcf, tbi ->
-            def base = "${meta.donor}/pairs/${meta.pair_dir}/variant_calling/raw"
-            [
-                pairManifestRecord(meta, 'strelka2_vcf', "${base}/${vcf.name}"),
-                pairManifestRecord(meta, 'strelka2_vcf_index', "${base}/${tbi.name}")
-            ]
+            indexedPairRecords(meta, 'strelka2_vcf', "${meta.donor}/pairs/${meta.pair_dir}/variant_calling/raw", vcf, tbi)
         }
 
-    def ch_deepsomatic_records = ch_deepsomatic_split.manifest.flatMap { meta, vcf, tbi ->
-        def base = "${meta.donor}/pairs/${meta.pair_dir}/variant_calling/raw"
-        [
-            pairManifestRecord(meta, 'deepsomatic_vcf', "${base}/${vcf.name}"),
-            pairManifestRecord(meta, 'deepsomatic_vcf_index', "${base}/${tbi.name}")
-        ]
+    def ch_deepsomatic_records = SOMATIC_CALLING.out.deepsomatic_vcf.flatMap { meta, vcf, tbi ->
+        indexedPairRecords(meta, 'deepsomatic_vcf', "${meta.donor}/pairs/${meta.pair_dir}/variant_calling/raw", vcf, tbi)
     }
 
     def ch_manta_records = SOMATIC_CALLING.out.manta_sv.flatMap { meta, vcf, tbi ->
-        def base = "${meta.donor}/pairs/${meta.pair_dir}/variant_calling"
-        [
-            pairManifestRecord(meta, 'manta_vcf', "${base}/${vcf.name}"),
-            pairManifestRecord(meta, 'manta_vcf_index', "${base}/${tbi.name}")
-        ]
+        indexedPairRecords(meta, 'manta_vcf', "${meta.donor}/pairs/${meta.pair_dir}/variant_calling", vcf, tbi)
     }
 
     def ch_cohort_records = QC.out.multiqc_report
         .map { report -> [scope: 'cohort', id: params.cohort_name, kind: 'multiqc_report', path: "cohort/multiqc/${report.name}"] }
         .mix(QC.out.multiqc_data.map { data -> [scope: 'cohort', id: params.cohort_name, kind: 'multiqc_data', path: "cohort/multiqc/${data.name}"] })
-        .mix(ch_somalier_split.manifest.flatMap { files ->
-            def outputFiles = files instanceof Collection ? files : [files]
-            outputFiles.collect { outputFile ->
+        .mix(QC.out.somalier.flatMap { files ->
+            asList(files).collect { outputFile ->
                 [scope: 'cohort', id: params.cohort_name, kind: 'somalier', path: "cohort/somalier/${outputFile.name}"]
             }
         })
-        .mix(ch_pon.flatMap { _cohort, vcf, tbi ->
+        .mix(PON_GENERATION.out.pon.flatMap { _cohort, vcf, tbi ->
             [
                 [scope: 'cohort', id: params.cohort_name, kind: 'pon_vcf', path: "cohort/pon/${vcf.name}"],
                 [scope: 'cohort', id: params.cohort_name, kind: 'pon_vcf_index', path: "cohort/pon/${tbi.name}"]
@@ -1022,8 +899,7 @@ ${yaml_rows}
             [scope: 'cohort', id: params.cohort_name, kind: 'dupcaller_summary', path: "cohort/dupcaller/${outputFile.name}"]
         })
         .mix(DUPCALLER.out.cohort_sbs96.flatMap { files ->
-            def outputFiles = files instanceof Collection ? files : [files]
-            outputFiles.collect { outputFile ->
+            asList(files).collect { outputFile ->
                 [scope: 'cohort', id: params.cohort_name, kind: 'dupcaller_sbs96', path: "cohort/dupcaller/${outputFile.name}"]
             }
         })
@@ -1072,7 +948,6 @@ ${yaml_rows}
         pipeline_version: workflow.manifest.version?.toString(),
         mode: effectiveMode,
         library_mode: effectiveLibraryMode,
-        dupcaller_version: params.dupcaller ? dupcallerVersion() : null,
         barcode_chemistry: params.dupcaller ? 'xgen_udseq_8bp_umi32' : null
     ]
     EMIT_OUTPUT_MANIFEST(manifest_info, ch_manifest_records)

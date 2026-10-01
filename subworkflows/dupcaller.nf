@@ -4,17 +4,15 @@ include { VEP_ANNOTATE } from '../modules/annotation'
 workflow DUPCALLER {
     take:
         ch_paired_bams
+        noiseMasks          // list of noise-mask VCF paths, possibly empty
+        maxZeroQualFraction
 
     main:
         if (params.dupcaller) {
-            def noiseMasks = params.dupcaller_noise_masks instanceof Collection
-                ? params.dupcaller_noise_masks.findAll { item -> item }
-                : (params.dupcaller_noise_masks ? params.dupcaller_noise_masks.toString().tokenize(',').collect { item -> item.trim() }.findAll { item -> item } : [])
+            // DUPCALLER_CALL always declares the mask and ePoN inputs; when they
+            // are not configured, stage small repo files in their place.
             def stagedNoiseMasks = noiseMasks ? noiseMasks.collect { mask -> file(mask) } : [file(params.dupcaller_umi_allowlist)]
             def stagedNoiseIndexes = noiseMasks ? noiseMasks.collect { mask -> file("${mask}.tbi") } : [file("${projectDir}/bin/validate_dupcaller_tags.awk")]
-            def maxZeroQualFraction = params.dupcaller_max_zero_qual_fraction != null
-                ? params.dupcaller_max_zero_qual_fraction
-                : (noiseMasks ? 0.5 : 0.1)
 
             DUPCALLER_CALL(
                 ch_paired_bams,
@@ -47,7 +45,7 @@ workflow DUPCALLER {
             )
 
             DUPCALLER_SUMMARIZE(
-                DUPCALLER_ESTIMATE.out.sample_dir.map { _meta, dir -> dir }.collect()
+                DUPCALLER_ESTIMATE.out.sample_dir.map { _meta, dir -> dir }.collect(sort: { a, b -> a.name <=> b.name })
             )
 
             def ch_vep_input = DUPCALLER_CALL.out.calls.flatMap { meta, dir ->

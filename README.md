@@ -1,22 +1,12 @@
 # imprint
 
-imprint calls somatic variants in paired, FACS-sorted immune-cell populations from bulk WES, WGS or xGen UDSeq data. Each donor has one reference population and one or more populations to compare against it. The samplesheet calls these normal (`status=0`) and tumour (`status=1`), including in healthy donors. The normal population may share clonal variants with the tumour population; it is not necessarily a constitutional germline control.
+imprint calls somatic variants between FACS-sorted immune-cell populations from the same donor, using bulk WES, WGS or xGen UDSeq duplex data. Each donor has one reference population (`status=0`, called the normal) and one or more populations compared against it (`status=1`, the tumour), healthy donors included. The normal is a cell population, not a germline control, and can share clonal variants with the tumour.
 
-This pipeline uses Nextflow DSL2 and was initially designed to run on the Charité SC HPC. Paths and resource settings in this repository are for that cluster and need changing for another site.
+It is a Nextflow pipeline built for the Charité SC HPC (SLURM + Apptainer). Paths and resources in `conf/` are for that cluster.
 
-## Requirements
+## Quick start
 
-- Nextflow 24.10 or newer, SLURM and Apptainer. Bulk calling also needs a GPU for DeepSomatic.
-- Paired-end FASTQs and a samplesheet as described below.
-- GRCh38 references, indexes, annotation resources and container images configured in [conf/resources.config](conf/resources.config). Capture data also need matching intervals in [conf/probekits.config](conf/probekits.config).
-
-Set the work and cache directories in `conf/resources.config`, and the queues, bind paths and resource limits in [conf/process.config](conf/process.config). Build the shared BWA-MEM3 alignment image from [assets/containers/align_env.def](assets/containers/align_env.def). Reference preparation scripts are in [assets/reference](assets/reference).
-
-DupCaller needs its own image and reference indexes; see below. Optional analyses need only the resources for the extras you select.
-
-## Samplesheet
-
-Use a CSV with these columns:
+Write a samplesheet, one row per lane:
 
 ```csv
 patient,cell_type,status,fastq_1,fastq_2
@@ -25,101 +15,81 @@ HC01,NKG2A,1,/data/HC01_NKG2A_R1.fastq.gz,/data/HC01_NKG2A_R2.fastq.gz
 HC01,NKG2C,1,/data/HC01_NKG2C_R1.fastq.gz,/data/HC01_NKG2C_R2.fastq.gz
 ```
 
-`patient` identifies the donor; `cell_type` identifies the population. Both must contain only letters and numbers. Each donor needs exactly one distinct normal sample. Repeat rows for additional sequencing lanes of the same sample; imprint merges them before duplicate marking. Use absolute FASTQ paths, with each file appearing only once.
+`patient` and `cell_type` must be alphanumeric, each donor needs exactly one normal, and each FASTQ may appear only once. Rows that share `patient` and `cell_type` are lanes of one sample and are merged.
 
-## Running
-
-For bulk WES:
+Then run:
 
 ```bash
 nextflow run /path/to/imprint/main.nf \
   -profile slurm,xgen_exome_v2 \
-  --samplesheet /path/to/samplesheet.csv \
+  --samplesheet samplesheet.csv \
   --cohort_name my_cohort \
-  --outdir /path/to/outdir
+  --outdir results
 ```
 
-Choose the profile that matches the capture kit: `agilent_v6`, `agilent_v7`, `agilent_v8`, `twist_v2` or `xgen_exome_v2`. Use `-profile slurm,wgs` for WGS, or `-profile slurm,xgen_exome_v2,dupcaller` for xGen UDSeq. Do not combine WGS and capture profiles. Add `-resume` to reuse completed tasks after fixing a failed run.
+Add `-resume` to pick up a failed run where it stopped.
 
-Bulk calling uses Mutect2, Strelka2 and DeepSomatic. Manta supplies candidate indels to Strelka2 and reports structural variants. The small-variant union retains sites that PASS any caller, then adds Vafator read evidence, VEP annotations and VarLociraptor probabilities. Raw and filtered caller outputs remain available. Population-frequency annotations do not impose a final study filter.
+## Modes
 
-Defaults are in [nextflow.config](nextflow.config). WES uses 50 bp padded capture intervals by default; `--off_target false` restricts calling to the targets. BQSR is off for WES and on for WGS. Set `--optical_dup_dist` for the sequencing instrument: the default is 2500 for patterned flow cells; unpatterned instruments use 100. `--trim_front` removes a fixed number of bases from both reads in bulk mode only.
+| Profile | Data | Calling |
+| --- | --- | --- |
+| `slurm,<kit>` | WES (`agilent_v6`, `agilent_v7`, `agilent_v8`, `twist_v2`, `xgen_exome_v2`) | Mutect2, Strelka2 and DeepSomatic, merged |
+| `slurm,wgs` | WGS | Same, genome-wide, with BQSR |
+| `slurm,xgen_exome_v2,dupcaller` | xGen UDSeq | DupCaller on raw duplex families |
 
-## xGen UDSeq
+**Bulk** keeps every site that any caller passes, then adds Vafator read counts, VEP annotation and VarLociraptor probabilities. No population-frequency filter is applied; that is left to the analysis. Exomes are called on 50 bp padded targets unless you pass `--off_target false`. Bulk calling needs a GPU for DeepSomatic.
 
-The DupCaller profile accepts xGen Exome Hyb Panel v2 libraries with an 8 bp UMI at the start of each mate. imprint corrects each UMI against the [xGen UMI32 allowlist](assets/umi_allowlists/xgen_8bp_umi32.txt), allowing one mismatch, then records the corrected pair in the read name and `DB` tag. It checks the tags after duplex-aware duplicate marking and after the CRAM round trip.
+**DupCaller** trims and error-corrects the 8 bp UMIs against the [UMI32 allowlist](assets/umi_allowlists/xgen_8bp_umi32.txt), marks duplicates duplex-aware, and runs DupCaller `call`, `estimate` and a cohort `summarize`. No consensus reads, overlap correction or BQSR, since DupCaller models raw families itself. VEP annotates the SBS and indel VCFs; select `FILTER=PASS` for final calls.
 
-DupCaller uses raw read families, without molecular consensus reads, overlap correction or BQSR. Each pair runs `call` and `estimate`, followed by a cohort `summarize`. VEP annotates PASS SBS and indel calls while preserving the DupCaller family fields. The bulk callers, Vafator, VarLociraptor and Mutect2 panels of normals are excluded from this mode.
+Set `--optical_dup_dist 100` for unpatterned flow cells (HiSeq 2500, MiSeq, NextSeq 550). Other defaults are in [nextflow.config](nextflow.config).
 
-The image definition pins DupCaller dev commit `53eb785` (version 1.1.2):
+## Setup
+
+All site settings live in `conf/`: references and container images in [resources.config](conf/resources.config), queues, binds and resources in [process.config](conf/process.config), capture kits in [probekits.config](conf/probekits.config).
+
+Build the two local images:
 
 ```bash
-apptainer build dupcaller_1.1.2-dev53eb785.sif assets/containers/dupcaller_env.def
+apptainer build align_process_env.sif assets/containers/align_env.def
+apptainer build dupcaller.sif assets/containers/dupcaller_env.def   # UDSeq only
 ```
 
-Point `container_dupcaller` to that image. Keep the version and commit in its filename; imprint reads the version for provenance. DupCaller reuses the bulk FASTA and BWA-MEM3 index and needs five additional files beside the FASTA: `<fasta>.ref.h5`, `<fasta>.tn.h5`, `<fasta>.hp.h5`, `<fasta>.str.h5` and `<fasta>.dbs.h5`.
-
-[bin/build_dupcaller_refs.sh](bin/build_dupcaller_refs.sh) prepares these indexes. The repeat scan needs PERF installed separately. It uses `PERF.core -m 1 -M 10 -u 2`; keep `-u 2` so short, low-copy repeats are included. The index step passes that repeat TSV to `DupCaller.py index -rt`.
-
-Configure noise masks and an optional indel ePoN in `conf/resources.config`, with a matching `.tbi` for each file. Check that masks match the chemistry, reference build and contig names. Unless overridden, the maximum zero-quality fraction is 0.5 with masks and 0.1 without them. Set `--dupcaller_seed` to reproduce the detection-power simulation; otherwise DupCaller records its chosen seed in the call log.
+Reference preparation scripts are in [assets/reference](assets/reference). DupCaller also needs five index files beside the FASTA (`<fasta>.ref.h5`, `.tn.h5`, `.hp.h5`, `.str.h5`, `.dbs.h5`); [bin/build_dupcaller_refs.sh](bin/build_dupcaller_refs.sh) builds them and needs PERF installed. Noise masks and an indel ePoN are set in `resources.config` and should match the chemistry and reference build.
 
 ## Outputs
 
-Within the output directory:
-
 ```text
 cohort/
-  samplesheet.csv
-  run_params.json
-  output_manifest.json
-  multiqc/
-  somalier/
-  dupcaller/                         # DupCaller cohort summary
+  run_params.json            # parameters, references, containers
+  output_manifest.json       # every emitted file with its sample/pair metadata
+  multiqc/  somalier/  dupcaller/
 {donor}/
   samples/{cell_type}/
-    alignment/                      # CRAM and index
+    alignment/               # CRAM
     qc/
   pairs/{tumour}_v_{normal}/
-    variant_calling/                 # bulk calls, including raw/
-    dupcaller/                      # DupCaller runs
-      calls/
-      burden/
-      annotated/                    # VEP-annotated PASS SBS and indels
+    variant_calling/         # {pair_id}.somatic.vcf.gz; per-caller files in raw/
+    dupcaller/               # calls/, burden/, annotated/
 ```
 
-`output_manifest.json` (schema 2.0) lists the emitted files and their sample or pair metadata. `run_params.json` records effective parameters, references, containers and launch details. Bulk final calls are `{pair_id}.somatic.vcf.gz` under `variant_calling/`.
-
-DupCaller keeps its `SBS/`, `INDEL/`, `DBS/` and `ERROR/` subdirectories. Callsets include the original VCF and a sorted, bgzip-compressed copy with a tabix index. The uncompressed `_fail.vcf` files retain rejected candidates and their filter reasons. `burden/` contains the estimates and plots produced for that callset.
-
-QC includes fastp, Mosdepth, VerifyBamID2, Somalier, Riker and MultiQC. In DupCaller runs, distinguish Mosdepth read depth from molecular duplex coverage in the DupCaller coverage BED. DupCaller error profiles replace the bulk read-position error report.
+QC is fastp, Mosdepth, VerifyBamID2, Somalier and Riker, collected in MultiQC. In DupCaller runs, use the coverage BED in `dupcaller/calls/` for duplex depth; Mosdepth reports deduplicated read depth.
 
 ## Optional analyses
 
-Add a comma-separated list, for example `--extras hla,kir,telseq`:
+Add any of these with `--extras`, e.g. `--extras hla,kir,telseq`. A failing extra does not stop the core pipeline.
 
-| Extra | Analysis | Additional requirement |
+| Extra | Runs | Needs |
 | --- | --- | --- |
-| `hla` | OptiType HLA typing per donor | HLA reference and Yara index |
-| `kir` | kir-mapper copy number and genotyping per donor | kir-mapper image and database |
-| `pathseq` | PathSeq microbial screening per sample | Host, microbial and taxonomy references |
+| `hla` | OptiType HLA typing, per donor | HLA reference with its Yara index |
+| `kir` | kir-mapper copy number and genotypes, per donor | kir-mapper image and database |
+| `pathseq` | PathSeq microbial screen, per sample | Host, microbe and taxonomy references |
 | `mixcr` | MiXCR immune-receptor repertoire | MiXCR licence (`--mixcr_license`) |
-| `telseq` | TelSeq telomere-length estimate | TelSeq image |
+| `telseq` | TelSeq telomere length | TelSeq image |
 
-These analyses may fail without cancelling the core outputs. MiXCR uses the trimmed reads for the selected mode; TelSeq uses merged BAMs before duplicate marking.
+## Mitochondrial variants
 
-Mitochondrial calling runs separately through [bin/imprint-mgatk2.sbatch](bin/imprint-mgatk2.sbatch), for bulk data only. It needs a NUMT-hardmasked reference and mgatk2 2.0.0 or newer. The launcher submits one SLURM array task per donor. Each pair produces `.mt_variants.vcf.gz`, its `.tbi` and `.mt_callable.bed.gz` under `{donor}/pairs/{tumour}_v_{normal}/mgatk2/`. VCF samples are ordered `NORMAL`, `TUMOR`; the `##mgatk2_qc=` header contains QC and provenance. Use the callable BED as the denominator for mitochondrial burden. These outputs are outside the Nextflow manifest and must be found by path.
+These run outside Nextflow, for bulk data only: [bin/imprint-mgatk2.sbatch](bin/imprint-mgatk2.sbatch) submits one SLURM job per donor and writes `{donor}/pairs/{pair}/mgatk2/`. It needs a NUMT-hardmasked reference and mgatk2 2.0.0 or newer. Use `*.mt_callable.bed.gz` as the burden denominator. These files are not in `output_manifest.json`.
 
-## Local checks
+## Citation
 
-```bash
-python3 bin/trim_dupcaller_umis.py --self-test
-python3 -m py_compile bin/trim_dupcaller_umis.py bin/collate_kir.py assets/reference/prepare_probe_kits.py
-nextflow lint main.nf modules/*.nf subworkflows/*.nf
-```
-
-These checks do not validate the cluster containers, reference files or biological results. Test those on the cluster before using a release for analysis.
-
-## Citation and licence
-
-imprint is released under the MIT licence; see [LICENSE](LICENSE). If you use it
-in published work, cite it using the metadata in [CITATION.cff](CITATION.cff).
+imprint is MIT-licensed. If you use it in published work, cite it with [CITATION.cff](CITATION.cff).

@@ -24,13 +24,12 @@ workflow SOMATIC_CALLING {
         }
 
         SPLIT_INTERVALS(ch_intervals_bed_split)
-        ch_split_source = SPLIT_INTERVALS.out
 
-        def ch_intervals_with_count = ch_split_source.intervals_gz
+        def ch_intervals_with_count = SPLIT_INTERVALS.out.intervals_gz
             .flatten()
             .map { f -> [f.simpleName, f] }
             .join(
-                ch_split_source.intervals_tbi
+                SPLIT_INTERVALS.out.intervals_tbi
                     .flatten()
                     .map { f -> [f.simpleName, f] },
                 by: 0, failOnDuplicate: true, failOnMismatch: true
@@ -48,25 +47,22 @@ workflow SOMATIC_CALLING {
                 .map { meta, tb, tbai, _nb, _nbai -> [meta, 'tumour', meta.tumor_id, tb, tbai] }
                 .set { ch_tumour_for_bqsr }
 
+            // A normal is shared by every pair in its donor; recalibrate it once,
+            // carrying the first pair's meta by name so the task hash is stable.
             ch_paired_bams
                 .map { meta, _tb, _tbai, nb, nbai -> [meta.normal_id, meta, nb, nbai] }
                 .groupTuple(by: 0)
-                .map { normal_id, metas, nbams, nbais -> [metas[0], 'normal', normal_id, nbams[0], nbais[0]] }
+                .map { normal_id, metas, nbams, nbais -> [metas.min { m -> m.pair_id }, 'normal', normal_id, nbams[0], nbais[0]] }
                 .set { ch_normal_for_bqsr }
 
             ch_normal_for_bqsr.mix(ch_tumour_for_bqsr).set { ch_bams_for_bqsr }
 
             BASE_RECALIBRATOR(ch_bams_for_bqsr)
 
-            def ch_recal_table_split = BASE_RECALIBRATOR.out.recal_table.multiMap { meta, role, sample_id, table ->
-                apply:    [meta, role, sample_id, table]
-                manifest: [meta, role, sample_id, table]
-            }
-
             ch_bams_for_bqsr
                 .map { meta, role, sample_id, bam, bai -> [ sample_id, meta, role, bam, bai ] }
                 .join(
-                    ch_recal_table_split.apply
+                    BASE_RECALIBRATOR.out.recal_table
                         .map { _meta, _role, sample_id, tbl -> [ sample_id, tbl ] },
                     by: 0, failOnDuplicate: true, failOnMismatch: true
                 )
@@ -90,23 +86,16 @@ workflow SOMATIC_CALLING {
                     by: 0
                 )
                 .map { _donor, meta, tb, tbai, nb, nbai -> [ meta, tb, tbai, nb, nbai ] }
-                .set { ch_paired_bams_for_mutect2 }
+                .set { ch_calling_bams }
 
-            ch_bqsr_recal = ch_recal_table_split.manifest
+            ch_bqsr_recal = BASE_RECALIBRATOR.out.recal_table
 
         } else {
-            ch_paired_bams.set { ch_paired_bams_for_mutect2 }
+            ch_paired_bams.set { ch_calling_bams }
             ch_bqsr_recal = channel.empty()
         }
 
-        def ch_calling_bams = ch_paired_bams_for_mutect2.multiMap { meta, tb, tbai, nb, nbai ->
-            mutect2:     [meta, tb, tbai, nb, nbai]
-            strelka2:    [meta, tb, tbai, nb, nbai]
-            deepsomatic: [meta, tb, tbai, nb, nbai]
-            annotation:  [meta, tb, tbai, nb, nbai]
-        }
-
-        ch_paired_bams_mutect2_scattered = ch_calling_bams.mutect2
+        ch_paired_bams_mutect2_scattered = ch_calling_bams
             .combine(ch_intervals_with_count)
             .map { meta, tb, tbai, nb, nbai, gz, tbi, count ->
                 [meta + [interval_count: count], tb, tbai, nb, nbai, gz, tbi]
@@ -114,12 +103,12 @@ workflow SOMATIC_CALLING {
 
         MUTECT2(ch_paired_bams_mutect2_scattered)
 
-        STRELKA2(ch_calling_bams.strelka2, ch_intervals_gz)
+        STRELKA2(ch_calling_bams, ch_intervals_gz)
 
-        DEEPSOMATIC(ch_calling_bams.deepsomatic)
+        DEEPSOMATIC(ch_calling_bams)
 
     emit:
-        calling_bams    = ch_calling_bams.annotation
+        calling_bams    = ch_calling_bams
         mutect2_vcf     = MUTECT2.out.vcf
         mutect2_raw_vcf = MUTECT2.out.raw_vcf
         mutect2_contamination = MUTECT2.out.contamination

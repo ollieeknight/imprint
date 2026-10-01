@@ -23,7 +23,7 @@ workflow ANNOTATION {
             .map { meta, vcf, tbi -> [meta.pair_id, meta, vcf, tbi] }
             .join(
                 ch_strelka_indel.map { meta, vcf, tbi -> [meta.pair_id, vcf, tbi] },
-                by: 0, failOnDuplicate: false, failOnMismatch: true
+                by: 0, failOnMismatch: true
             )
             .map { _pair_id, meta, snv, snv_tbi, indel, indel_tbi -> [meta, snv, snv_tbi, indel, indel_tbi] }
             .set { ch_strelka_for_concat }
@@ -45,12 +45,7 @@ workflow ANNOTATION {
 
         ENSEMBLE_CONSENSUS(ch_ensemble_input)
 
-        def ch_ensemble_split = ENSEMBLE_CONSENSUS.out.vcf.multiMap { meta, vcf, tbi ->
-            vafator:       [meta, vcf, tbi]
-            varlociraptor: [meta, vcf, tbi]
-        }
-
-        ch_ensemble_split.vafator
+        ENSEMBLE_CONSENSUS.out.vcf
             .map { meta, vcf, tbi -> [meta.pair_id, meta, vcf, tbi] }
             .join(
                 ch_paired_bams.map { meta, tb, tbai, nb, nbai -> [meta.pair_id, meta, tb, tbai, nb, nbai] },
@@ -63,7 +58,7 @@ workflow ANNOTATION {
 
         VAFATOR(ch_vafator_input)
 
-        VARLOCIRAPTOR(ch_paired_bams, ch_ensemble_split.varlociraptor, ch_sex)
+        VARLOCIRAPTOR(ch_paired_bams, ENSEMBLE_CONSENSUS.out.vcf, ch_sex)
 
         TUMOR_NORMAL_FILTER(VAFATOR.out.vcf)
 

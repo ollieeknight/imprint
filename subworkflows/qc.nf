@@ -3,71 +3,52 @@ include { MOSDEPTH; VERIFYBAMID2; SOMALIER_EXTRACT; SOMALIER_RELATE; RIKER_QC; P
 workflow QC {
     take:
         ch_bams          // [meta, bam, bai], analysis BAMs
-        ch_align_reports // fastp JSON/HTML, from ALIGN.out.reports
+        ch_align_reports // fastp JSON/HTML and duplicate metrics, from ALIGN.out.reports
         ch_config_yaml   // pipeline config YAML for MultiQC
 
     main:
-        def ch_bams_split = ch_bams.multiMap { meta, bam, bai ->
-            mosdepth: [meta, bam, bai]
-            error:    [meta, bam, bai]
-            verify:   [meta, bam, bai]
-            riker:    [meta, bam, bai]
-            somalier: [meta, bam, bai]
-            groups:   [meta, bam, bai]
-        }
+        def byName = { a, b -> a.name <=> b.name }
 
-        MOSDEPTH(ch_bams_split.mosdepth)
+        MOSDEPTH(ch_bams)
         if (params.dupcaller) {
             ch_error_metrics = channel.empty()
         } else {
-            PER_BASE_ERROR_RATE(ch_bams_split.error)
+            PER_BASE_ERROR_RATE(ch_bams)
             ch_error_metrics = PER_BASE_ERROR_RATE.out.metrics
         }
-        VERIFYBAMID2(ch_bams_split.verify)
+        VERIFYBAMID2(ch_bams)
 
-        RIKER_QC(
-            ch_bams_split.riker.map { meta, bam, bai ->
-                def baits   = (!params.genome && params.bait_intervals)   ? file(params.bait_intervals)   : file('NO_FILE')
-                def targets = (!params.genome && params.target_intervals) ? file(params.target_intervals) : file('NO_FILE')
-                [ meta, bam, bai, baits, targets ]
-            }
-        )
+        def baits   = (!params.genome && params.bait_intervals)   ? file(params.bait_intervals)   : file('NO_FILE')
+        def targets = (!params.genome && params.target_intervals) ? file(params.target_intervals) : file('NO_FILE')
+        RIKER_QC(ch_bams.map { meta, bam, bai -> [meta, bam, bai, baits, targets] })
 
-        SOMALIER_EXTRACT(ch_bams_split.somalier)
+        SOMALIER_EXTRACT(ch_bams)
 
-        def ch_groups = ch_bams_split.groups
+        // Sorted so the groups file is identical across runs.
+        def ch_groups = ch_bams
             .map { meta, _bam, _bai -> [meta.donor, meta.id] }
             .groupTuple()
-            .map { _donor, ids -> ids.join(',') }
-            .collectFile(name: 'groups.txt', newLine: true)
+            .map { _donor, ids -> ids.sort().join(',') }
+            .collectFile(name: 'groups.txt', newLine: true, sort: true)
 
-        SOMALIER_RELATE(SOMALIER_EXTRACT.out.extracted.collect(), ch_groups)
-
-        def ch_mosdepth_split = MOSDEPTH.out.cov.multiMap { meta, files ->
-            multiqc:  [meta, files]
-            manifest: [meta, files]
-        }
-
-        def ch_riker_split = RIKER_QC.out.metrics.multiMap { meta, files ->
-            multiqc:  [meta, files]
-            manifest: [meta, files]
-        }
+        SOMALIER_RELATE(SOMALIER_EXTRACT.out.extracted.collect(sort: byName), ch_groups)
 
         ch_align_reports
-            .mix(ch_mosdepth_split.multiqc.map { _meta, f -> f })
-            .mix(ch_riker_split.multiqc.map { _meta, f -> f })
+            .mix(MOSDEPTH.out.cov.map { _meta, f -> f })
+            .mix(RIKER_QC.out.metrics.map { _meta, f -> f })
             .mix(VERIFYBAMID2.out.selfsm.map { _meta, f -> f })
             .mix(SOMALIER_RELATE.out.results)
             .mix(ch_config_yaml)
-            .collect()
+            .flatten()
+            .collect(sort: byName)
             .set { ch_multiqc_files }
 
         MULTIQC(ch_multiqc_files)
 
     emit:
-        mosdepth_cov    = ch_mosdepth_split.manifest
+        mosdepth_cov    = MOSDEPTH.out.cov
         selfsm          = VERIFYBAMID2.out.selfsm
-        riker_metrics   = ch_riker_split.manifest
+        riker_metrics   = RIKER_QC.out.metrics
         riker_charts    = RIKER_QC.out.charts
         error_metrics   = ch_error_metrics
         somalier        = SOMALIER_RELATE.out.results

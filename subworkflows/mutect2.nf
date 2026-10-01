@@ -8,6 +8,11 @@ include {
     MERGE_VCFS
 } from '../modules/mutect2'
 
+// Shards finish in any order; regroup per pair once all have arrived.
+def byPair(meta) {
+    groupKey(meta.subMap(meta.keySet() - 'interval_count'), meta.interval_count)
+}
+
 workflow MUTECT2 {
     take:
         ch_paired_bams_scattered // [meta+{interval_count}, tb, tbai, nb, nbai, interval_gz, interval_tbi]
@@ -16,10 +21,7 @@ workflow MUTECT2 {
         CALL(ch_paired_bams_scattered)
 
         CALL.out.unfiltered_vcf
-            .map { meta, vcf, tbi ->
-                def clean_meta = meta.subMap(meta.keySet() - 'interval_count')
-                [groupKey(clean_meta, meta.interval_count), vcf, tbi]
-            }
+            .map { meta, vcf, tbi -> [byPair(meta), vcf, tbi] }
             .groupTuple(by: 0)
             .map { gkey, vcfs, tbis ->
                 def sorted = [vcfs, tbis].transpose().sort { a, b -> a[0].name <=> b[0].name }.transpose()
@@ -30,19 +32,13 @@ workflow MUTECT2 {
         MERGE_VCFS(ch_mutect2_vcfs_to_merge)
 
         CALL.out.f1r2
-            .map { meta, f1r2 ->
-                def clean_meta = meta.subMap(meta.keySet() - 'interval_count')
-                [groupKey(clean_meta, meta.interval_count), f1r2]
-            }
+            .map { meta, f1r2 -> [byPair(meta), f1r2] }
             .groupTuple(by: 0)
             .map { gkey, f1r2s -> [gkey.target, f1r2s.sort { f -> f.name }] }
             .set { ch_mutect2_grouped_f1r2 }
 
         CALL.out.stats
-            .map { meta, stats ->
-                def clean_meta = meta.subMap(meta.keySet() - 'interval_count')
-                [groupKey(clean_meta, meta.interval_count), stats]
-            }
+            .map { meta, stats -> [byPair(meta), stats] }
             .groupTuple(by: 0)
             .map { gkey, stats -> [gkey.target, stats.flatten().sort { f -> f.name }] }
             .set { ch_mutect2_grouped_stats }
@@ -87,26 +83,13 @@ workflow MUTECT2 {
 
         CONTAMINATION(ch_contamination_input)
 
-        def ch_contamination_split = CONTAMINATION.out.contamination.multiMap { meta, table ->
-            filtering: [meta, table]
-            manifest:  [meta, table]
-        }
-        def ch_segments_split = CONTAMINATION.out.segments.multiMap { meta, table ->
-            filtering: [meta, table]
-            manifest:  [meta, table]
-        }
-        def ch_merged_vcf_split = MERGE_VCFS.out.vcf.multiMap { meta, vcf, tbi ->
-            filtering: [meta, vcf, tbi]
-            manifest: [meta, vcf, tbi]
-        }
-
-        ch_merged_vcf_split.filtering
+        MERGE_VCFS.out.vcf
             .map { meta, vcf, tbi -> [meta.pair_id, meta, vcf, tbi] }
             .join(ch_mutect2_grouped_f1r2.map { meta, f1r2s -> [meta.pair_id, f1r2s] },
                 by: 0, failOnDuplicate: true, failOnMismatch: true)
-            .join(ch_contamination_split.filtering.map { meta, c -> [meta.pair_id, c] },
+            .join(CONTAMINATION.out.contamination.map { meta, c -> [meta.pair_id, c] },
                 by: 0, failOnDuplicate: true, failOnMismatch: true)
-            .join(ch_segments_split.filtering.map { meta, s -> [meta.pair_id, s] },
+            .join(CONTAMINATION.out.segments.map { meta, s -> [meta.pair_id, s] },
                 by: 0, failOnDuplicate: true, failOnMismatch: true)
             .join(MERGE_STATS.out.stats.map { meta, s -> [meta.pair_id, s] },
                 by: 0, failOnDuplicate: true, failOnMismatch: true)
@@ -119,7 +102,7 @@ workflow MUTECT2 {
 
     emit:
         vcf           = FILTER.out.vcf
-        raw_vcf       = ch_merged_vcf_split.manifest
-        contamination = ch_contamination_split.manifest
-        segments      = ch_segments_split.manifest
+        raw_vcf       = MERGE_VCFS.out.vcf
+        contamination = CONTAMINATION.out.contamination
+        segments      = CONTAMINATION.out.segments
 }

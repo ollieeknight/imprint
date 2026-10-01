@@ -102,15 +102,13 @@ process KIR_MAPPER {
     sed -i "s|__KIR_MAPPER_DB__|${params.kirmapper_db}|g" .kir-mapper
     export HOME=\$PWD
 
-    # Subset to KIR/LILRB locus + HLA-E/G locus + all alt/unplaced contigs + unmapped.
-    # Regions:
+    # Keep read pairs touching:
     #   chr19:54000000-56000000  KIR + LILRB genes (LRC)
     #   chr6:29600000-30000000   HLA-E and HLA-G
-    #   ALL_ALTS                 every non-primary contig (alt, unplaced, decoy); B-haplotype
-    #                            KIR reads absent from GRCh38 primary may land anywhere here.
-    # Two-pass for mate rescue: reads whose mate maps to these regions but the read itself
-    # landed elsewhere are captured by name-based second pass.
-    # -f 12 = both reads unmapped; avoids double-counting mates already rescued by name.
+    #   ALL_ALTS                 every non-primary contig; B-haplotype KIR reads
+    #                            absent from GRCh38 primary can land on any of them.
+    # The second pass pulls in mates by read name, wherever they mapped. -f 12 adds
+    # pairs where both reads are unmapped.
     ALL_ALTS=\$(samtools view -H "${bam}" | \
       awk '/^@SQ/ {sub(/.*SN:/, "", \$2); print \$2}' | \
       grep -vE '^chr([1-9]|1[0-9]|2[0-2]|X|Y|M)\$' | \
@@ -146,7 +144,6 @@ process KIR_MAPPER {
         -threads ${task.cpus} \\
         ${exome_flag}
 
-    # Clean up intermediate SAM files from kir-mapper processing
     find results/ -name "*.sam*" -type f -delete
     mv results/ncopy .
     if [ -d results/genotype ]; then

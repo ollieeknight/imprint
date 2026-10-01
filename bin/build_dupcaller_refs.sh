@@ -2,7 +2,7 @@
 set -euo pipefail
 
 REF_ROOT=${REF_ROOT:-/sc-projects/sc-proj-cc12-ag-romagnani/ref/imprint}
-CONTAINER=${CONTAINER:-/sc-scratch/sc-scratch-cc12-ag-romagnani/apptainer_cache/dupcaller_1.1.2-dev53eb785.sif}
+CONTAINER=${CONTAINER:-/sc-scratch/sc-scratch-cc12-ag-romagnani/apptainer_cache/dupcaller.sif}
 PERF_PYTHON=${PERF_PYTHON:-python3}
 THREADS=${THREADS:-${SLURM_CPUS_PER_TASK:-16}}
 
@@ -38,7 +38,7 @@ do_repeats() {
     "$PERF_PYTHON" -c 'import PERF' 2>/dev/null \
         || die "PERF not importable by $PERF_PYTHON. Install it first: pip install perf_ssr"
 
-    local n_threads="${THREADS:-${SLURM_CPUS_PER_TASK:-4}}"
+    local n_threads=$THREADS
     log "running PERF: parallel across contigs with $n_threads workers"
 
     local stage
@@ -123,7 +123,6 @@ with open(tmp_merged, "wb") as out_f:
 os.replace(tmp_merged, output_tsv)
 PY
 
-    rm -rf "$stage"
     log "wrote $REPEAT_TSV ($(wc -l <"$REPEAT_TSV") repeat rows)"
     note repeats "source: $FASTA" "command: PERF.core -m 1 -M 10 -u 2 (parallel $n_threads workers)" "output: $REPEAT_TSV"
 }
@@ -257,7 +256,7 @@ self_test() {
 
 case ${1:-} in
     --self-test) self_test; exit ;;
-    -h|--help) die "usage: $(basename "$0") [--self-test] [str|index|genes|verify ...]" ;;
+    -h|--help) die "usage: $(basename "$0") [--self-test] [repeats|index|genes|verify ...]" ;;
 esac
 
 for step in ${@:-repeats index genes verify}; do

@@ -16,12 +16,7 @@ From: python:3.12-slim
         tabix
     rm -rf /var/lib/apt/lists/*
 
-    git clone https://github.com/AlexandrovLab/DupCaller /opt/DupCaller
-    git -C /opt/DupCaller checkout 53eb785
-    git -C /opt/DupCaller rev-parse HEAD > /opt/dupcaller_commit.txt
-
-    pip install --no-cache-dir /opt/DupCaller
-    rm -rf /opt/DupCaller/.git
+    pip install --no-cache-dir git+https://github.com/AlexandrovLab/DupCaller
 
 %environment
     export MPLCONFIGDIR=/tmp
@@ -32,7 +27,7 @@ From: python:3.12-slim
     exec "$@"
 
 %test
-    python -c 'import DupCaller_sub; print(DupCaller_sub.__version__)'
+    python -c 'import DupCaller_sub'
     DupCaller.py call --help > /dev/null
     DupCaller.py estimate --help > /dev/null
     DupCaller.py summarize --help > /dev/null

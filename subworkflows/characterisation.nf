@@ -10,14 +10,6 @@ include {
 
 include { MIXCR; MIXCR_EXPORT_CLONES } from '../modules/mixcr'
 
-def isExtraEnabled(String name, Set aliases = []) {
-    if (params.extras) {
-        def _extras = params.extras.tokenize(',').collect { v -> v.trim().toLowerCase() }.toSet()
-        return (name in _extras) || aliases.any { a -> a in _extras }
-    }
-    return false
-}
-
 workflow CHARACTERISATION {
     take:
         ch_all_bams_per_donor // [meta_donor, bams, bais], all analysis BAMs per donor
@@ -26,29 +18,26 @@ workflow CHARACTERISATION {
         ch_merged_bam         // [meta, bam, bai], pre-dedup merged BAMs (for TelSeq)
         ch_fastp_stats        // [id, short_inserts, read_length], for TelSeq read length
         ch_pathseq_references // [host IMG, host HSS, microbe IMG, microbe dict, taxonomy DB]
+        extras                // resolved --extras names, e.g. ['hla', 'kir']
 
     main:
-        def run_hla     = isExtraEnabled('hla', ['optitype'] as Set)
-        def run_kir     = isExtraEnabled('kir', ['kirmapper', 'kir_mapper'] as Set)
-        def run_pathseq = isExtraEnabled('pathseq')
-        def run_mixcr   = isExtraEnabled('mixcr')
-        def run_telseq  = isExtraEnabled('telseq')
+        def run_hla     = 'hla' in extras
+        def run_kir     = 'kir' in extras
+        def run_pathseq = 'pathseq' in extras
+        def run_mixcr   = 'mixcr' in extras
+        def run_telseq  = 'telseq' in extras
 
         if (run_hla || run_kir) {
             MERGE_DONOR_BAMS(ch_all_bams_per_donor)
-            ch_donor_bams_split = MERGE_DONOR_BAMS.out.bam.multiMap { meta, bam, bai ->
-                hla: [meta, bam, bai]
-                kir: [meta, bam, bai]
-            }
         }
 
         if (run_hla) {
-            OPTITYPE_EXTRACT(ch_donor_bams_split.hla, channel.fromPath("${params.hla_reference}*").collect())
+            OPTITYPE_EXTRACT(MERGE_DONOR_BAMS.out.bam, channel.fromPath("${params.hla_reference}*").collect(sort: true))
             OPTITYPE_GENOTYPE(OPTITYPE_EXTRACT.out.bams)
         }
 
         if (run_kir) {
-            KIR_MAPPER(ch_donor_bams_split.kir)
+            KIR_MAPPER(MERGE_DONOR_BAMS.out.bam)
             KIR_COLLATE(
                 KIR_MAPPER.out.raw,
                 file("${projectDir}/bin/collate_kir.py")
@@ -64,7 +53,6 @@ workflow CHARACTERISATION {
             MIXCR(ch_trimmed_reads, ch_mixcr_license)
             MIXCR_EXPORT_CLONES(MIXCR.out.clns, ch_mixcr_license)
         }
-
 
         if (run_telseq) {
             ch_merged_bam

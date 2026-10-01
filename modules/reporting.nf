@@ -63,13 +63,12 @@ process EMIT_OUTPUT_MANIFEST {
             [kind, outputRecords.collect { record -> record.path }.findAll { path -> path }.unique().sort()]
         })
     def output = [
-        schema_version: '2.0',
+        schema_version: manifest_info.pipeline_version,
         pipeline: 'imprint',
         pipeline_version: manifest_info.pipeline_version,
         cohort: manifest_info.cohort,
         mode: manifest_info.mode,
         library_mode: manifest_info.library_mode,
-        dupcaller_version: manifest_info.dupcaller_version,
         barcode_chemistry: manifest_info.barcode_chemistry,
         samples: groupManifestRecords(recordList, 'sample'),
         pairs: groupManifestRecords(recordList, 'pair'),
@@ -93,7 +92,7 @@ process EMIT_PROVENANCE {
     path 'run_params.json', emit: provenance
 
     exec:
-    def output = [schema_version: '2.0', pipeline: 'imprint'] + run_info
+    def output = [schema_version: run_info.pipeline_version, pipeline: 'imprint'] + run_info
     def json = groovy.json.JsonOutput.prettyPrint(groovy.json.JsonOutput.toJson(jsonSafe(output)))
     task.workDir.resolve('run_params.json').text = json + '\n'
 }
