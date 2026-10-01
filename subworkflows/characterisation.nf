@@ -6,9 +6,10 @@ include {
     KIR_COLLATE
     PATHSEQ
     TELSEQ
-} from '../modules/tumour_characterisation'
-
-include { MIXCR; MIXCR_EXPORT_CLONES } from '../modules/mixcr'
+    MIXCR
+    MIXCR_EXPORT_CLONES
+} from '../modules/characterisation'
+include { optionalFile } from './common'
 
 workflow CHARACTERISATION {
     take:
@@ -37,11 +38,8 @@ workflow CHARACTERISATION {
         }
 
         if (run_kir) {
-            KIR_MAPPER(MERGE_DONOR_BAMS.out.bam)
-            KIR_COLLATE(
-                KIR_MAPPER.out.raw,
-                file("${projectDir}/bin/collate_kir.py")
-            )
+            KIR_MAPPER(MERGE_DONOR_BAMS.out.bam, file(params.kirmapper_db))
+            KIR_COLLATE(KIR_MAPPER.out.raw, file("${projectDir}/bin/collate_kir.py"))
         }
 
         if (run_pathseq) {
@@ -49,20 +47,17 @@ workflow CHARACTERISATION {
         }
 
         if (run_mixcr) {
-            def ch_mixcr_license = params.mixcr_license ? file(params.mixcr_license) : file('NO_FILE')
-            MIXCR(ch_trimmed_reads, ch_mixcr_license)
-            MIXCR_EXPORT_CLONES(MIXCR.out.clns, ch_mixcr_license)
+            def license = file(params.mixcr_license)
+            MIXCR(ch_trimmed_reads, license)
+            MIXCR_EXPORT_CLONES(MIXCR.out.clns, license)
         }
 
         if (run_telseq) {
-            ch_merged_bam
+            def ch_bams_with_rlen = ch_merged_bam
                 .map { meta, bam, bai -> [meta.id, meta, bam, bai] }
                 .join(ch_fastp_stats)
-                .map { _id, meta, bam, bai, _short_inserts, read_length ->
-                    [meta + [read_length: read_length], bam, bai]
-                }
-                .set { ch_bams_with_rlen }
-            TELSEQ(ch_bams_with_rlen)
+                .map { _id, meta, bam, bai, _short_inserts, read_length -> [meta + [read_length: read_length], bam, bai] }
+            TELSEQ(ch_bams_with_rlen, params.genome ? [] : optionalFile(params.intervals_bed))
         }
 
     emit:

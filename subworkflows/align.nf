@@ -1,4 +1,5 @@
 include { FASTP } from '../modules/qc'
+include { fastaRef; bwaIndex } from './common'
 
 include {
     BWA_MEM3_LANE_BULK
@@ -15,8 +16,7 @@ def sampleMeta(meta) {
     meta.subMap(meta.keySet() - ['run_count', 'run_id'])
 }
 
-// Lanes finish in any order. Sort them so the merge command, and with it the
-// -resume hash of everything downstream, does not change between runs.
+// Lanes finish in any order; sort them so the merge command, and -resume, stay stable.
 def groupLanes(ch) {
     ch.map { meta, bam -> [groupKey(meta.id, meta.run_count), meta, bam] }
         .groupTuple(by: 0)
@@ -38,15 +38,17 @@ workflow ALIGN {
     main:
         def trim_front = params.trim_front as Integer
 
+        def fasta = fastaRef()
+
         FASTP(ch_fastq)
 
         if (!params.dupcaller) {
-            BWA_MEM3_LANE_BULK(FASTP.out.trimmed_reads)
+            BWA_MEM3_LANE_BULK(FASTP.out.trimmed_reads, bwaIndex())
             SORT_LANE_BULK(BWA_MEM3_LANE_BULK.out.bam)
             MERGE_TAGGED_BAMS(groupLanes(SORT_LANE_BULK.out.bam))
             MARK_DUPLICATES(MERGE_TAGGED_BAMS.out.tagged_bam)
-            CORRECT_OVERLAPPING_BASES(MARK_DUPLICATES.out.dedup_bam)
-            EXPORT_CRAM(CORRECT_OVERLAPPING_BASES.out.bam)
+            CORRECT_OVERLAPPING_BASES(MARK_DUPLICATES.out.dedup_bam, fasta)
+            EXPORT_CRAM(CORRECT_OVERLAPPING_BASES.out.bam, fasta)
 
             ch_analysis_bam       = CORRECT_OVERLAPPING_BASES.out.bam
             ch_markdup_metrics    = MARK_DUPLICATES.out.metrics
@@ -60,14 +62,14 @@ workflow ALIGN {
             def validator = file("${projectDir}/bin/validate_dupcaller_tags.awk")
 
             DUPCALLER_TRIM_LANE(ch_fastq, allowlist, file("${projectDir}/bin/trim_dupcaller_umis.py"))
-            DUPCALLER_ALIGN_LANE(DUPCALLER_TRIM_LANE.out.reads)
+            DUPCALLER_ALIGN_LANE(DUPCALLER_TRIM_LANE.out.reads, bwaIndex())
             DUPCALLER_SORT_LANE(DUPCALLER_ALIGN_LANE.out.bam)
             MERGE_TAGGED_BAMS(groupLanes(DUPCALLER_SORT_LANE.out.bam))
             DUPCALLER_MARK_DUPLICATES(MERGE_TAGGED_BAMS.out.tagged_bam)
             // Tag validation gates downstream DupCaller tasks.
             DUPCALLER_VALIDATE_BAM(DUPCALLER_MARK_DUPLICATES.out.bam, allowlist, validator)
-            EXPORT_CRAM(DUPCALLER_VALIDATE_BAM.out.bam)
-            DUPCALLER_VALIDATE_CRAM(EXPORT_CRAM.out.cram, allowlist, validator)
+            EXPORT_CRAM(DUPCALLER_VALIDATE_BAM.out.bam, fasta)
+            DUPCALLER_VALIDATE_CRAM(EXPORT_CRAM.out.cram, allowlist, validator, fasta)
 
             ch_analysis_bam       = DUPCALLER_VALIDATE_BAM.out.bam
             ch_markdup_metrics    = DUPCALLER_MARK_DUPLICATES.out.metrics

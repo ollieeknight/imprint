@@ -8,6 +8,7 @@ include { ANNOTATION }       from './subworkflows/annotation'
 include { PON_GENERATION } from './subworkflows/pon'
 include { DUPCALLER } from './subworkflows/dupcaller'
 include { EMIT_OUTPUT_MANIFEST; EMIT_PROVENANCE } from './modules/reporting'
+include { listParam; effectiveMaxZeroQualFraction; callingBed } from './subworkflows/common'
 
 
 def preflight_samplesheet(String path) {
@@ -35,11 +36,11 @@ def preflight_samplesheet(String path) {
                 error "Samplesheet contains an empty '${col}' value"
         }
         ['patient', 'cell_type'].each { col ->
-            if (!(row[col] ==~ /[A-Za-z0-9]+/))
-                error "Samplesheet ${col} must be strictly alphanumeric ([A-Za-z0-9]+), got '${row[col]}'"
+            if (!(row[col] ==~ /[A-Za-z0-9][A-Za-z0-9_-]*/))
+                error "Samplesheet ${col} must be letters, digits, '_' or '-', starting with a letter or digit; got '${row[col]}'"
         }
         if (row.status != '0' && row.status != '1')
-            error "Samplesheet row for ${row.patient}_${row.cell_type}: status must be '0' (normal) or '1' (tumour), got '${row.status}'"
+            error "Samplesheet row for ${row.patient}_${row.cell_type}: status must be '0' (normal) or '1' (tumor), got '${row.status}'"
 
         ['fastq_1', 'fastq_2'].each { col ->
             if (!file(row[col]).exists())
@@ -70,6 +71,15 @@ def preflight_samplesheet(String path) {
             error "Patient ${patient}: ${normals.size()} normal samples (status=0) found; exactly one required"
     }
 
+    // IDs join names with '_', so different rows can produce the same ID (HC_01 + CD4 vs HC + 01_CD4).
+    def samples = rows.collect { r -> [r.patient, r.cell_type, r.status] }.unique()
+    def normalOf = samples.findAll { s -> s[2] == '0' }.collectEntries { s -> [s[0], s[1]] }
+    def ids = samples.collect { s -> "${s[0]}_${s[1]}" } +
+        samples.findAll { s -> s[2] == '1' }.collect { s -> "${s[0]}_${s[1]}_v_${normalOf[s[0]]}" }
+    def clashes = ids.groupBy { id -> id.toLowerCase() }.findAll { _id, group -> group.size() > 1 }
+    if (clashes)
+        error "Samplesheet names produce colliding sample or pair IDs (case-insensitive): ${clashes.values().flatten().unique().join(', ')}"
+
     rows
 }
 
@@ -98,18 +108,6 @@ def requireIndexedVcf(String name, value) {
     requireFileParam(name, value)
     if (!file("${value}.tbi").exists())
         error "Index for '${name}' not found: ${value}.tbi"
-}
-
-def effectiveMaxZeroQualFraction() {
-    params.dupcaller_max_zero_qual_fraction != null
-        ? params.dupcaller_max_zero_qual_fraction
-        : (listParam(params.dupcaller_noise_masks) ? 0.5 : 0.1)
-}
-
-def listParam(value) {
-    value instanceof Collection
-        ? value.findAll { item -> item }
-        : (value ? value.toString().tokenize(',').collect { item -> item.trim() }.findAll { item -> item } : [])
 }
 
 def validateDuplexAllowlist(value) {
@@ -289,7 +287,7 @@ workflow {
     requireIndexedVcf('spliceai_snv_vcf', params.spliceai_snv_vcf)
     requireIndexedVcf('gnomad_exomes_vep_vcf', params.gnomad_exomes_vep_vcf)
     requireIndexedVcf('gnomad_genomes_vep_vcf', params.gnomad_genomes_vep_vcf)
-    requireFileParam('alphamissense_tsv', params.alphamissense_tsv)
+    requireIndexedVcf('alphamissense_tsv', params.alphamissense_tsv)
     requireIndexedVcf('dbnsfp_gz', params.dbnsfp_gz)
     requireDirectoryParam('vep_cache', params.vep_cache)
     requireDirectoryParam('vep_plugins_dir', params.vep_plugins_dir)
@@ -402,8 +400,7 @@ workflow {
     cohort_dir.mkdirs()
     file(params.samplesheet).copyTo(cohort_dir.resolve("samplesheet.csv"))
 
-    def effectiveIntervals = params.genome ? null : (params.off_target ? params.padded_intervals_bed : params.intervals_bed)
-    def effectiveScatterCount = params.genome ? (params.genome_scatter_count ?: 50) : params.wes_scatter_count
+    def calling_bed = callingBed()
 
     def effectiveParams = [
         samplesheet             : params.samplesheet,
@@ -414,10 +411,10 @@ workflow {
         library_mode            : effectiveLibraryMode,
         spliceai_mode           : effectiveSpliceAiMode,
         skip_bqsr               : params.dupcaller ? null : params.skip_bqsr,
-        calling_intervals       : effectiveIntervals,
+        calling_intervals       : calling_bed ? calling_bed.toString() : null,
         bait_intervals          : params.genome ? null : params.bait_intervals,
         target_intervals        : params.genome ? null : params.target_intervals,
-        scatter_count           : params.dupcaller ? null : effectiveScatterCount,
+        scatter_count           : params.dupcaller ? null : (params.genome ? params.genome_scatter_count : params.wes_scatter_count),
         filter_soft_clips       : params.dupcaller ? null : (params.filter_soft_clips == null ? 'autodetect_per_sample' : params.filter_soft_clips),
         optical_dup_dist        : params.optical_dup_dist,
         trim_front              : trimFront,
@@ -536,11 +533,11 @@ workflow {
         cohort_name              : params.cohort_name,
         kit_name                 : params.kit_name              ?: 'unknown',
         assay_mode               : effectiveMode,
-        calling_intervals        : effectiveIntervals ? effectiveIntervals.split('/')[-1] : 'genome-wide',
+        calling_intervals        : calling_bed ? calling_bed.name : 'genome-wide',
         off_target               : params.off_target,
         library_mode             : effectiveLibraryMode,
         skip_bqsr                : params.skip_bqsr,
-        mosdepth_regions         : params.genome ? 'genome-wide' : effectiveIntervals.split('/')[-1],
+        mosdepth_regions         : calling_bed ? calling_bed.name : 'genome-wide',
         optical_dup_dist         : params.optical_dup_dist,
         trim_front               : trimFront,
     ] + (params.dupcaller ? [
@@ -562,9 +559,7 @@ data:
 ${yaml_rows}
 """.stripIndent()
 
-    channel.of(yaml_text)
-        .collectFile(name: 'pipeline_config_mqc.yaml')
-        .set { ch_config_yaml }
+    def ch_config_yaml = channel.of(yaml_text).collectFile(name: 'pipeline_config_mqc.yaml')
 
     QC(ALIGN.out.analysis_bam, ALIGN.out.reports, ch_config_yaml)
 
@@ -600,18 +595,18 @@ ${yaml_rows}
 
     def branch_bams = ALIGN.out.analysis_bam
         .branch { meta, _bam, _bai ->
-            tumour: meta.status == '1'
+            tumor: meta.status == '1'
             normal: meta.status == '0'
         }
 
-    def ch_tumour_enriched = branch_bams.tumour
+    def ch_tumor_enriched = branch_bams.tumor
         .map { meta, bam, bai -> [meta.id, meta, bam, bai] }
         .join(ALIGN.out.fastp_stats)
         .map { _id, meta, bam, bai, short_inserts, read_length ->
             [meta + [short_inserts: short_inserts, read_length: read_length], bam, bai]
         }
 
-    def ch_paired_bams = ch_tumour_enriched
+    def ch_paired_bams = ch_tumor_enriched
         .map { meta, bam, bai -> [ meta.donor, meta, bam, bai ] }
         .combine(
             branch_bams.normal.map { meta, bam, bai -> [ meta.donor, meta, bam, bai ] },
@@ -628,17 +623,10 @@ ${yaml_rows}
                 tumor_cell_type:  tm.cell_type,
                 normal_cell_type: nm.cell_type,
                 short_inserts:    tm.short_inserts,
-                tumour_count:     tm.donor_sample_count - 1,
+                tumor_count:      tm.donor_sample_count - 1,
             ]
             [ paired_meta, tb, tbai, nb, nbai ]
         }
-
-    def ch_bulk_paired = params.dupcaller ? channel.empty() : ch_paired_bams
-    def ch_dupcaller_paired = params.dupcaller ? ch_paired_bams : channel.empty()
-    SOMATIC_CALLING(ch_bulk_paired)
-    DUPCALLER(ch_dupcaller_paired, listParam(params.dupcaller_noise_masks), effectiveMaxZeroQualFraction())
-
-    PON_GENERATION(params.dupcaller ? channel.empty() : branch_bams.normal, params.dupcaller ? 0 : normal_count)
 
     CHARACTERISATION(
         ch_all_bams_per_donor,
@@ -650,15 +638,65 @@ ${yaml_rows}
         resolved_extras
     )
 
-    ANNOTATION(
-        // VAFATOR and VarLociraptor use the calling BAMs.
-        params.dupcaller ? channel.empty() : SOMATIC_CALLING.out.calling_bams,
-        SOMATIC_CALLING.out.mutect2_vcf,
-        SOMATIC_CALLING.out.strelka_snv,
-        SOMATIC_CALLING.out.strelka_indel,
-        SOMATIC_CALLING.out.deepsomatic_vcf,
-        ch_sex
-    )
+
+    // DupCaller and the bulk callers are mutually exclusive; this is the only place that chooses.
+    def ch_mode_records = channel.empty()
+    if (params.dupcaller) {
+        DUPCALLER(ch_paired_bams)
+
+        ch_mode_records = channel.empty().mix(
+            DUPCALLER.out.calls.flatMap { meta, dir -> dupcallerManifestRecords(meta, dir, 'dupcaller_call', "${meta.donor}/pairs/${meta.pair_dir}/dupcaller/calls") },
+            DUPCALLER.out.burden.flatMap { meta, dir -> dupcallerManifestRecords(meta, dir, 'dupcaller_burden', "${meta.donor}/pairs/${meta.pair_dir}/dupcaller/burden") },
+            DUPCALLER.out.annotated.flatMap { meta, mutation_type, vcf, tbi ->
+                def base = "${meta.donor}/pairs/${meta.pair_dir}/dupcaller/annotated"
+                [
+                    pairManifestRecord(meta, "dupcaller_annotated_${mutation_type}_vcf", "${base}/${vcf.name}"),
+                    pairManifestRecord(meta, "dupcaller_annotated_${mutation_type}_vcf_index", "${base}/${tbi.name}")
+                ]
+            },
+            cohortRecords(DUPCALLER.out.cohort_summary, 'dupcaller_summary', 'dupcaller'),
+            cohortRecords(DUPCALLER.out.cohort_sbs96, 'dupcaller_sbs96', 'dupcaller')
+        )
+    } else {
+        SOMATIC_CALLING(ch_paired_bams)
+        PON_GENERATION(branch_bams.normal, normal_count)
+        ANNOTATION(
+            SOMATIC_CALLING.out.calling_bams,
+            SOMATIC_CALLING.out.mutect2_vcf,
+            SOMATIC_CALLING.out.strelka_snv,
+            SOMATIC_CALLING.out.strelka_indel,
+            SOMATIC_CALLING.out.deepsomatic_vcf,
+            ch_sex
+        )
+
+        def ch_bqsr_records = SOMATIC_CALLING.out.bqsr_recal.map { meta, role, sample_id, table ->
+            def cell_type = role == 'tumor' ? meta.tumor_cell_type : meta.normal_cell_type
+            def sample_meta = [id: sample_id, donor: meta.donor, cell_type: cell_type, status: role == 'tumor' ? '1' : '0']
+            sampleManifestRecord(sample_meta, 'bqsr_recalibration_table', "${meta.donor}/samples/${cell_type}/qc/bqsr/${table.name}")
+        }
+        def ch_pon_normal_records = PON_GENERATION.out.normal_vcf.flatMap { meta, vcf, tbi ->
+            [
+                sampleManifestRecord(meta, 'pon_normal_vcf', "cohort/pon/normals/${vcf.name}"),
+                sampleManifestRecord(meta, 'pon_normal_vcf_index', "cohort/pon/normals/${tbi.name}")
+            ]
+        }
+
+        ch_mode_records = channel.empty().mix(
+            ch_bqsr_records,
+            ch_pon_normal_records,
+            indexedPairRecords(ANNOTATION.out.final_vcf, 'ensemble_vcf', 'variant_calling'),
+            indexedPairRecords(ANNOTATION.out.varlociraptor, 'varlociraptor_bcf', 'variant_calling/raw'),
+            indexedPairRecords(SOMATIC_CALLING.out.mutect2_raw_vcf, 'mutect2_vcf', 'variant_calling/raw'),
+            indexedPairRecords(SOMATIC_CALLING.out.mutect2_vcf, 'mutect2_filtered_vcf', 'variant_calling/raw'),
+            pairRecords(SOMATIC_CALLING.out.mutect2_contamination, 'mutect2_contamination_table', 'variant_calling/raw'),
+            pairRecords(SOMATIC_CALLING.out.mutect2_segments, 'mutect2_segmentation_table', 'variant_calling/raw'),
+            indexedPairRecords(SOMATIC_CALLING.out.strelka_snv.mix(SOMATIC_CALLING.out.strelka_indel), 'strelka2_vcf', 'variant_calling/raw'),
+            indexedPairRecords(SOMATIC_CALLING.out.deepsomatic_vcf, 'deepsomatic_vcf', 'variant_calling/raw'),
+            indexedPairRecords(SOMATIC_CALLING.out.manta_sv, 'manta_vcf', 'variant_calling'),
+            cohortRecords(PON_GENERATION.out.pon.map { vcf, _tbi -> vcf }, 'pon_vcf', 'pon'),
+            cohortRecords(PON_GENERATION.out.pon.map { _vcf, tbi -> tbi }, 'pon_vcf_index', 'pon')
+        )
+    }
 
     // output_manifest.json records
     def ch_mosdepth_records = QC.out.mosdepth_cov.flatMap { meta, files ->
@@ -677,33 +715,6 @@ ${yaml_rows}
         }
     }
 
-    def ch_bqsr_records = SOMATIC_CALLING.out.bqsr_recal.map { meta, role, sample_id, table ->
-        def cell_type = role == 'tumour' ? meta.tumor_cell_type : meta.normal_cell_type
-        def sample_meta = [
-            id: sample_id, donor: meta.donor, cell_type: cell_type,
-            status: role == 'tumour' ? '1' : '0'
-        ]
-        sampleManifestRecord(sample_meta, 'bqsr_recalibration_table', "${meta.donor}/samples/${cell_type}/qc/bqsr/${table.name}")
-    }
-
-    def ch_pon_normal_records = PON_GENERATION.out.normal_vcf.flatMap { meta, vcf, tbi ->
-        [
-            sampleManifestRecord(meta, 'pon_normal_vcf', "cohort/pon/normals/${vcf.name}"),
-            sampleManifestRecord(meta, 'pon_normal_vcf_index', "cohort/pon/normals/${tbi.name}")
-        ]
-    }
-
-    def ch_dupcaller_records = DUPCALLER.out.calls
-        .flatMap { meta, dir -> dupcallerManifestRecords(meta, dir, 'dupcaller_call', "${meta.donor}/pairs/${meta.pair_dir}/dupcaller/calls") }
-        .mix(DUPCALLER.out.burden.flatMap { meta, dir -> dupcallerManifestRecords(meta, dir, 'dupcaller_burden', "${meta.donor}/pairs/${meta.pair_dir}/dupcaller/burden") })
-        .mix(DUPCALLER.out.annotated.flatMap { meta, mutation_type, vcf, tbi ->
-            def base = "${meta.donor}/pairs/${meta.pair_dir}/dupcaller/annotated"
-            [
-                pairManifestRecord(meta, "dupcaller_annotated_${mutation_type}_vcf", "${base}/${vcf.name}"),
-                pairManifestRecord(meta, "dupcaller_annotated_${mutation_type}_vcf_index", "${base}/${tbi.name}")
-            ]
-        })
-
     def ch_manifest_records = channel.empty().mix(
         sampleRecords(ALIGN.out.cram.map { meta, cram, _crai -> [meta, cram] }, 'cram', 'alignment'),
         sampleRecords(ALIGN.out.cram.map { meta, _cram, crai -> [meta, crai] }, 'crai', 'alignment'),
@@ -721,8 +732,6 @@ ${yaml_rows}
         sampleRecords(ALIGN.out.barcode_metrics, 'dupcaller_barcode_metrics', 'qc/dupcaller'),
         sampleRecords(ALIGN.out.tag_metrics, 'dupcaller_tag_validation', 'qc/dupcaller'),
         sampleRecords(ALIGN.out.cram_tag_metrics, 'dupcaller_cram_tag_validation', 'qc/dupcaller'),
-        ch_dupcaller_records,
-        ch_bqsr_records,
         sampleRecords(CHARACTERISATION.out.pathseq_scores, 'pathseq_scores', 'pathseq'),
         sampleRecords(CHARACTERISATION.out.pathseq_bam, 'pathseq_bam', 'pathseq'),
         sampleRecords(CHARACTERISATION.out.pathseq_filter_metrics, 'pathseq_filter_metrics', 'pathseq'),
@@ -741,23 +750,10 @@ ${yaml_rows}
         donorRecords(CHARACTERISATION.out.kir_calls, 'kirmapper_calls', 'kir'),
         donorRecords(CHARACTERISATION.out.kir_reports, 'kirmapper_reports', 'kir'),
         donorRecords(CHARACTERISATION.out.kir_raw_archive, 'kirmapper_raw_archive', 'kir'),
-        indexedPairRecords(ANNOTATION.out.final_vcf, 'ensemble_vcf', 'variant_calling'),
-        indexedPairRecords(ANNOTATION.out.varlociraptor, 'varlociraptor_bcf', 'variant_calling/raw'),
-        indexedPairRecords(SOMATIC_CALLING.out.mutect2_raw_vcf, 'mutect2_vcf', 'variant_calling/raw'),
-        indexedPairRecords(SOMATIC_CALLING.out.mutect2_vcf, 'mutect2_filtered_vcf', 'variant_calling/raw'),
-        pairRecords(SOMATIC_CALLING.out.mutect2_contamination, 'mutect2_contamination_table', 'variant_calling/raw'),
-        pairRecords(SOMATIC_CALLING.out.mutect2_segments, 'mutect2_segmentation_table', 'variant_calling/raw'),
-        ch_pon_normal_records,
-        indexedPairRecords(SOMATIC_CALLING.out.strelka_snv.mix(SOMATIC_CALLING.out.strelka_indel), 'strelka2_vcf', 'variant_calling/raw'),
-        indexedPairRecords(SOMATIC_CALLING.out.deepsomatic_vcf, 'deepsomatic_vcf', 'variant_calling/raw'),
-        indexedPairRecords(SOMATIC_CALLING.out.manta_sv, 'manta_vcf', 'variant_calling'),
         cohortRecords(QC.out.multiqc_report, 'multiqc_report', 'multiqc'),
         cohortRecords(QC.out.multiqc_data, 'multiqc_data', 'multiqc'),
         cohortRecords(QC.out.somalier, 'somalier', 'somalier'),
-        cohortRecords(PON_GENERATION.out.pon.map { _cohort, vcf, _tbi -> vcf }, 'pon_vcf', 'pon'),
-        cohortRecords(PON_GENERATION.out.pon.map { _cohort, _vcf, tbi -> tbi }, 'pon_vcf_index', 'pon'),
-        cohortRecords(DUPCALLER.out.cohort_summary, 'dupcaller_summary', 'dupcaller'),
-        cohortRecords(DUPCALLER.out.cohort_sbs96, 'dupcaller_sbs96', 'dupcaller')
+        ch_mode_records
     ).collect()
 
     def manifest_info = [

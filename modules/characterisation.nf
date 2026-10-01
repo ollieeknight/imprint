@@ -1,7 +1,5 @@
 process MERGE_DONOR_BAMS {
     label 'process_medium'
-    label 'process_low_memory'
-    label 'process_long'
     tag "${meta.donor}"
     container "${params.container_samtools}"
 
@@ -20,8 +18,6 @@ process MERGE_DONOR_BAMS {
 
 process OPTITYPE_EXTRACT {
     label 'process_high'
-    label 'process_low_memory'
-    label 'process_short'
     tag "${meta.donor}"
     container "${params.container_yara}"
 
@@ -34,6 +30,7 @@ process OPTITYPE_EXTRACT {
                      path("r2.mapped.bam"), path("r2.mapped.bam.bai"), emit: bams
 
     script:
+    def hla_fasta = file(params.hla_reference).name
     """
     # The donor BAM is duplicate-marked, not duplicate-removed. Exclude flagged
     # PCR/optical duplicates so HLA support reflects independent templates.
@@ -43,7 +40,7 @@ process OPTITYPE_EXTRACT {
             -1 r1.fq.gz -2 r2.fq.gz \\
             -0 /dev/null -s /dev/null -N
 
-    yara_mapper -t ${task.cpus} -f bam hla_reference_dna.fasta r1.fq.gz r2.fq.gz > mapped.bam
+    yara_mapper -t ${task.cpus} -f bam "${hla_fasta}" r1.fq.gz r2.fq.gz > mapped.bam
 
     samtools view -@ ${task.cpus} -hF 4 -f 0x40 -b mapped.bam | samtools sort -@ ${task.cpus} > r1.mapped.bam
     samtools view -@ ${task.cpus} -hF 4 -f 0x80 -b mapped.bam | samtools sort -@ ${task.cpus} > r2.mapped.bam
@@ -83,13 +80,12 @@ process OPTITYPE_GENOTYPE {
 
 process KIR_MAPPER {
     label 'process_high'
-    label 'process_high_memory'
-    label 'process_very_long'
     tag "${meta.donor}"
     container "${params.container_kir_mapper}"
 
     input:
     tuple val(meta), path(bam), path(bai)
+    path(kirmapper_db)
 
     output:
     tuple val(meta), path("ncopy"), path("genotype"), emit: raw
@@ -99,7 +95,7 @@ process KIR_MAPPER {
     """
     # Write kir-mapper config with resolved db path; set HOME so kir-mapper finds it.
     cp /opt/.kir-mapper .kir-mapper
-    sed -i "s|__KIR_MAPPER_DB__|${params.kirmapper_db}|g" .kir-mapper
+    sed -i "s|__KIR_MAPPER_DB__|\$(readlink -f ${kirmapper_db})|g" .kir-mapper
     export HOME=\$PWD
 
     # Keep read pairs touching:
@@ -127,19 +123,19 @@ process KIR_MAPPER {
 
     kir-mapper map \\
         -bam kir_sorted.bam \\
-        -db ${params.kirmapper_db} \\
+        -db ${kirmapper_db} \\
         -threads ${task.cpus} \\
         ${exome_flag} \\
         -output results/
 
     kir-mapper ncopy \\
-        -db ${params.kirmapper_db} \\
+        -db ${kirmapper_db} \\
         -output results/ \\
         -threads ${task.cpus} \\
         ${exome_flag}
 
     kir-mapper genotype \\
-        -db ${params.kirmapper_db} \\
+        -db ${kirmapper_db} \\
         -output results/ \\
         -threads ${task.cpus} \\
         ${exome_flag}
@@ -181,9 +177,7 @@ process KIR_COLLATE {
 }
 
 process PATHSEQ {
-    label 'process_high'
     label 'process_high_cpu'
-    label 'process_long'
     tag "${meta.id}"
     container "${params.container_gatk}"
     publishDir {
@@ -266,21 +260,98 @@ process PATHSEQ {
 
 process TELSEQ {
     label 'process_low'
-    label 'process_short'
     tag "${meta.id}"
     container "${params.container_telseq}"
     publishDir { "${params.outdir}/${meta.donor}/samples/${meta.cell_type}/telseq" }, mode: 'copy'
 
     input:
     tuple val(meta), path(bam), path(bai)
+    path(target_bed)
 
     output:
     tuple val(meta), path("${meta.id}.telseq.txt"), optional: true, emit: telseq
 
     script:
-    def exome_arg = (!params.genome && params.intervals_bed) ? "-e ${params.intervals_bed}" : ''
+    def exome_arg = target_bed ? "-e ${target_bed}" : ''
     def rlen      = meta.read_length ?: 100
     """
     telseq -m -r ${rlen} ${exome_arg} ${bam} > ${meta.id}.telseq.txt
+    """
+}
+
+process MIXCR {
+    label 'process_high_cpu'
+    tag "${meta.id}"
+    container "${params.container_mixcr}"
+    publishDir {
+        "${params.outdir}/${meta.donor}/samples/${meta.cell_type}/mixcr"
+    }, mode: 'copy'
+
+    input:
+    tuple val(meta), path(r1s), path(r2s)
+    path license_file
+
+    output:
+    tuple val(meta), path("${meta.id}.qc.txt"),                          emit: report
+    tuple val(meta), path("${meta.id}.qc.json"),                         emit: report_json
+    tuple val(meta), path("${meta.id}.contigs.clns"),                    emit: clns
+    tuple val(meta), path("${meta.id}.*.report.txt"),                    emit: step_reports_txt
+    tuple val(meta), path("${meta.id}.*.report.json"), optional: true,   emit: step_reports_json
+
+    script:
+    """
+    export MI_LICENSE_FILE="\$(realpath "${license_file}")"
+
+    cat ${r1s} > combined_R1.fastq.gz
+    cat ${r2s} > combined_R2.fastq.gz
+
+    mixcr analyze exome-seq \\
+        --species hsa \\
+        --assemble-longest-contigs \\
+        -t ${task.cpus} \\
+        combined_R1.fastq.gz combined_R2.fastq.gz \\
+        "${meta.id}"
+    """
+}
+
+process MIXCR_EXPORT_CLONES {
+    label 'process_medium'
+    tag "${meta.id}"
+    container "${params.container_mixcr}"
+    publishDir {
+        "${params.outdir}/${meta.donor}/samples/${meta.cell_type}/mixcr"
+    }, mode: 'copy'
+
+    input:
+    tuple val(meta), path(clns)
+    path license_file
+
+    output:
+    tuple val(meta), path("${meta.id}.clonotypes.*.tsv"), optional: true, emit: clonotypes_tsv
+
+    script:
+    """
+    export MI_LICENSE_FILE="\$(realpath "${license_file}")"
+
+    mixcr exportClones \\
+        --filter-out-of-frames \\
+        --filter-stops \\
+        --split-files-by chain \\
+        --not-covered-as-empty \\
+        -cloneId \\
+        -readCount \\
+        -readFraction \\
+        -chains \\
+        -vHit -dHit -jHit -cHit \\
+        -vGene -dGene -jGene -cGene \\
+        -vFamily -jFamily \\
+        -nFeature CDR3 \\
+        -aaFeature CDR3 \\
+        -nLength CDR3 \\
+        -isProductive CDR3 \\
+        -vBestIdentityPercent -jBestIdentityPercent \\
+        -nMutationsCount VRegion \\
+        "${clns}" \\
+        "${meta.id}.clonotypes.tsv"
     """
 }

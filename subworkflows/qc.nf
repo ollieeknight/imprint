@@ -1,4 +1,5 @@
 include { MOSDEPTH; VERIFYBAMID2; SOMALIER_EXTRACT; SOMALIER_RELATE; RIKER_QC; PER_BASE_ERROR_RATE; MULTIQC } from '../modules/qc'
+include { fastaRef; indexed; optionalFile; callingBed } from './common'
 
 workflow QC {
     take:
@@ -8,21 +9,17 @@ workflow QC {
 
     main:
         def byName = { a, b -> a.name <=> b.name }
+        def fasta = fastaRef()
 
-        MOSDEPTH(ch_bams)
-        if (params.dupcaller) {
-            ch_error_metrics = channel.empty()
-        } else {
-            PER_BASE_ERROR_RATE(ch_bams)
+        MOSDEPTH(ch_bams, callingBed())
+        def ch_error_metrics = channel.empty()
+        if (!params.dupcaller) {
+            PER_BASE_ERROR_RATE(ch_bams, fasta, indexed(params.dbsnp))
             ch_error_metrics = PER_BASE_ERROR_RATE.out.metrics
         }
-        VERIFYBAMID2(ch_bams)
-
-        def baits   = (!params.genome && params.bait_intervals)   ? file(params.bait_intervals)   : file('NO_FILE')
-        def targets = (!params.genome && params.target_intervals) ? file(params.target_intervals) : file('NO_FILE')
-        RIKER_QC(ch_bams.map { meta, bam, bai -> [meta, bam, bai, baits, targets] })
-
-        SOMALIER_EXTRACT(ch_bams)
+        VERIFYBAMID2(ch_bams, fasta)
+        RIKER_QC(ch_bams, fasta, [optionalFile(params.bait_intervals), optionalFile(params.target_intervals)])
+        SOMALIER_EXTRACT(ch_bams, fasta, indexed(params.somalier_sites))
 
         // Sorted so the groups file is identical across runs.
         def ch_groups = ch_bams
@@ -33,7 +30,7 @@ workflow QC {
 
         SOMALIER_RELATE(SOMALIER_EXTRACT.out.extracted.collect(sort: byName), ch_groups)
 
-        ch_align_reports
+        def ch_multiqc_files = ch_align_reports
             .mix(MOSDEPTH.out.cov.map { _meta, f -> f })
             .mix(RIKER_QC.out.metrics.map { _meta, f -> f })
             .mix(VERIFYBAMID2.out.selfsm.map { _meta, f -> f })
@@ -41,9 +38,8 @@ workflow QC {
             .mix(ch_config_yaml)
             .flatten()
             .collect(sort: byName)
-            .set { ch_multiqc_files }
 
-        MULTIQC(ch_multiqc_files)
+        MULTIQC(ch_multiqc_files, file(params.multiqc_config))
 
     emit:
         mosdepth_cov    = MOSDEPTH.out.cov

@@ -1,121 +1,61 @@
 include { PREPARE_INTERVALS; SPLIT_INTERVALS } from '../modules/intervals'
-include { MUTECT2 }                               from './mutect2'
-include { STRELKA2 }                              from './strelka2'
-include { DEEPSOMATIC }                           from './deepsomatic'
-include { BASE_RECALIBRATOR; APPLY_BQSR }         from '../modules/mutect2'
+include { BASE_RECALIBRATOR; APPLY_BQSR }      from '../modules/bqsr'
+include { DEEPSOMATIC }                        from '../modules/deepsomatic'
+include { MUTECT2 }                            from './mutect2'
+include { STRELKA2 }                           from './strelka2'
+include { fastaRef; indexed; callingBed; tumors; normalsOnce; repair } from './common'
 
 workflow SOMATIC_CALLING {
     take:
         ch_paired_bams // [meta, tumor_bam, tumor_bai, normal_bam, normal_bai]
 
     main:
-        def effective_bed = params.off_target ? params.padded_intervals_bed : params.intervals_bed
-        if (params.dupcaller) {
-            ch_intervals_gz = channel.empty()
-            ch_intervals_bed_split = channel.empty()
-        } else if (params.genome) {
-            ch_intervals_gz = channel.value([file('NO_FILE_GZ'), file('NO_FILE_TBI')])
-            ch_intervals_bed_split = channel.value(file('NO_FILE'))
-        } else {
-            ch_intervals_bed = channel.value(file(effective_bed))
-            PREPARE_INTERVALS(ch_intervals_bed)
+        def fasta = fastaRef()
+        def bed   = callingBed()
+
+        def ch_intervals_gz = channel.value([[], []])
+        if (bed) {
+            PREPARE_INTERVALS(bed)
             ch_intervals_gz = PREPARE_INTERVALS.out.intervals
-            ch_intervals_bed_split = channel.value(file(effective_bed))
         }
 
-        SPLIT_INTERVALS(ch_intervals_bed_split)
-
-        def ch_intervals_with_count = SPLIT_INTERVALS.out.intervals_gz
+        SPLIT_INTERVALS(bed, fasta)
+        def ch_shards = SPLIT_INTERVALS.out.intervals_gz
             .flatten()
             .map { f -> [f.simpleName, f] }
-            .join(
-                SPLIT_INTERVALS.out.intervals_tbi
-                    .flatten()
-                    .map { f -> [f.simpleName, f] },
-                by: 0, failOnDuplicate: true, failOnMismatch: true
-            )
+            .join(SPLIT_INTERVALS.out.intervals_tbi.flatten().map { f -> [f.simpleName, f] }, failOnDuplicate: true, failOnMismatch: true)
             .map { _name, gz, tbi -> [gz, tbi] }
-            .collect()
-            .flatMap { paths ->
-                def pairs = paths.collate(2)
-                def count = pairs.size()
-                pairs.collect { pair -> [pair[0], pair[1], count] }
-            }
 
+        def ch_calling_bams = ch_paired_bams
+        def ch_bqsr_recal   = channel.empty()
         if (!params.skip_bqsr) {
-            ch_paired_bams
-                .map { meta, tb, tbai, _nb, _nbai -> [meta, 'tumour', meta.tumor_id, tb, tbai] }
-                .set { ch_tumour_for_bqsr }
+            def ch_samples = tumors(ch_paired_bams).mix(normalsOnce(ch_paired_bams))
+            def known_sites = indexed(params.dbsnp) + indexed(params.known_indels_mills) + indexed(params.known_snps_1000g)
+            BASE_RECALIBRATOR(ch_samples, fasta, bed, known_sites)
 
-            // A normal is shared by every pair in its donor; recalibrate it once,
-            // carrying the first pair's meta by name so the task hash is stable.
-            ch_paired_bams
-                .map { meta, _tb, _tbai, nb, nbai -> [groupKey(meta.normal_id, meta.tumour_count), meta, nb, nbai] }
-                .groupTuple(by: 0)
-                .map { normal_id, metas, nbams, nbais -> [metas.min { m -> m.pair_id }, 'normal', normal_id.toString(), nbams[0], nbais[0]] }
-                .set { ch_normal_for_bqsr }
+            def ch_apply_input = ch_samples
+                .map { meta, role, sample_id, bam, bai -> [sample_id, meta, role, bam, bai] }
+                .join(BASE_RECALIBRATOR.out.recal_table.map { _meta, _role, sample_id, table -> [sample_id, table] }, failOnDuplicate: true, failOnMismatch: true)
+                .map { sample_id, meta, role, bam, bai, table -> [meta, role, sample_id, bam, bai, table] }
+            APPLY_BQSR(ch_apply_input, fasta)
 
-            ch_normal_for_bqsr.mix(ch_tumour_for_bqsr).set { ch_bams_for_bqsr }
-
-            BASE_RECALIBRATOR(ch_bams_for_bqsr)
-
-            ch_bams_for_bqsr
-                .map { meta, role, sample_id, bam, bai -> [ sample_id, meta, role, bam, bai ] }
-                .join(
-                    BASE_RECALIBRATOR.out.recal_table
-                        .map { _meta, _role, sample_id, tbl -> [ sample_id, tbl ] },
-                    by: 0, failOnDuplicate: true, failOnMismatch: true
-                )
-                .map { sample_id, meta, role, bam, bai, tbl -> [ meta, role, sample_id, bam, bai, tbl ] }
-                .set { ch_apply_bqsr_input }
-
-            APPLY_BQSR(ch_apply_bqsr_input)
-
-            APPLY_BQSR.out.bam
-                .branch { _meta, role, _sample_id, _bam, _bai ->
-                    tumour: role == 'tumour'
-                    normal: role == 'normal'
-                }
-                .set { ch_bqsr_bams }
-
-            ch_bqsr_bams.tumour
-                .map { meta, _role, _sample_id, tb, tbai -> [ meta.donor, meta, tb, tbai ] }
-                .combine(
-                    ch_bqsr_bams.normal
-                        .map { meta, _role, _sample_id, nb, nbai -> [ meta.donor, nb, nbai ] },
-                    by: 0
-                )
-                .map { _donor, meta, tb, tbai, nb, nbai -> [ meta, tb, tbai, nb, nbai ] }
-                .set { ch_calling_bams }
-
-            ch_bqsr_recal = BASE_RECALIBRATOR.out.recal_table
-
-        } else {
-            ch_paired_bams.set { ch_calling_bams }
-            ch_bqsr_recal = channel.empty()
+            ch_calling_bams = repair(APPLY_BQSR.out.bam)
+            ch_bqsr_recal   = BASE_RECALIBRATOR.out.recal_table
         }
 
-        ch_paired_bams_mutect2_scattered = ch_calling_bams
-            .combine(ch_intervals_with_count)
-            .map { meta, tb, tbai, nb, nbai, gz, tbi, count ->
-                [meta + [interval_count: count], tb, tbai, nb, nbai, gz, tbi]
-            }
-
-        MUTECT2(ch_paired_bams_mutect2_scattered)
-
+        MUTECT2(ch_calling_bams, ch_shards)
         STRELKA2(ch_calling_bams, ch_intervals_gz)
-
-        DEEPSOMATIC(ch_calling_bams)
+        DEEPSOMATIC(ch_calling_bams, fasta, bed)
 
     emit:
-        calling_bams    = ch_calling_bams
-        mutect2_vcf     = MUTECT2.out.vcf
-        mutect2_raw_vcf = MUTECT2.out.raw_vcf
+        calling_bams          = ch_calling_bams
+        mutect2_vcf           = MUTECT2.out.vcf
+        mutect2_raw_vcf       = MUTECT2.out.raw_vcf
         mutect2_contamination = MUTECT2.out.contamination
-        mutect2_segments = MUTECT2.out.segments
-        strelka_snv     = STRELKA2.out.snv
-        strelka_indel   = STRELKA2.out.indel
-        manta_sv        = STRELKA2.out.manta_sv
-        deepsomatic_vcf = DEEPSOMATIC.out
-        bqsr_recal      = ch_bqsr_recal
+        mutect2_segments      = MUTECT2.out.segments
+        strelka_snv           = STRELKA2.out.snv
+        strelka_indel         = STRELKA2.out.indel
+        manta_sv              = STRELKA2.out.manta_sv
+        deepsomatic_vcf       = DEEPSOMATIC.out.vcf
+        bqsr_recal            = ch_bqsr_recal
 }

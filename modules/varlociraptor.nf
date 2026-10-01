@@ -1,37 +1,36 @@
 process VARLOCIRAPTOR_ALIGNMENT_PROPERTIES {
     label 'process_low'
-    label 'process_low_memory'
-    label 'process_very_short'
     tag "${sample_id}"
     container "${params.container_varlociraptor}"
 
     input:
     tuple val(meta), val(role), val(sample_id), path(bam), path(bai)
+    tuple path(fasta), path(fai), path(dict)
 
     output:
     tuple val(meta), val(role), val(sample_id), path("${sample_id}.alignment_properties.json"), emit: json
 
     script:
     """
-    varlociraptor estimate alignment-properties "${params.ref_fasta}" --bams "${bam}" > "${sample_id}.alignment_properties.json"
+    varlociraptor estimate alignment-properties "${fasta}" --bams "${bam}" > "${sample_id}.alignment_properties.json"
     """
 }
 
 process VARLOCIRAPTOR_PREPROCESS {
     label 'process_medium'
-    label 'process_low_memory'
     tag "${sample_id}"
     container "${params.container_varlociraptor}"
 
     input:
     tuple val(meta), val(role), val(sample_id), path(bam), path(bai), path(candidates_vcf), path(candidates_tbi), path(alignment_properties_json)
+    tuple path(fasta), path(fai), path(dict)
 
     output:
     tuple val(meta), val(role), path("${sample_id}.obs.bcf"), emit: bcf
 
     script:
     """
-    varlociraptor preprocess variants "${params.ref_fasta}" \\
+    varlociraptor preprocess variants "${fasta}" \\
         --bam "${bam}" \\
         --candidates "${candidates_vcf}" \\
         --output "${sample_id}.obs.bcf" \\
@@ -44,12 +43,11 @@ process VARLOCIRAPTOR_PREPROCESS {
 
 process VARLOCIRAPTOR_CALLVARIANTS {
     label 'process_medium'
-    label 'process_low_memory'
     tag "${meta.pair_id}"
     container "${params.container_varlociraptor}"
 
     input:
-    tuple val(meta), path(tumour_obs_bcf), path(normal_obs_bcf), path(scenario_yaml)
+    tuple val(meta), path(tumor_obs_bcf), path(normal_obs_bcf), path(scenario_yaml)
 
     output:
     tuple val(meta), path("${meta.pair_id}.varlociraptor.bcf"), emit: bcf
@@ -58,14 +56,12 @@ process VARLOCIRAPTOR_CALLVARIANTS {
     """
     varlociraptor call variants --output "${meta.pair_id}.varlociraptor.bcf" generic \\
         --scenario "${scenario_yaml}" \\
-        --obs tumor="${tumour_obs_bcf}" normal="${normal_obs_bcf}"
+        --obs tumor="${tumor_obs_bcf}" normal="${normal_obs_bcf}"
     """
 }
 
 process VARLOCIRAPTOR_INDEX {
     label 'process_low'
-    label 'process_low_memory'
-    label 'process_very_short'
     tag "${meta.pair_id}"
     container "${params.container_bcftools}"
     publishDir { "${params.outdir}/${meta.donor}/pairs/${meta.pair_dir}/variant_calling/raw" }, mode: 'copy'
@@ -84,8 +80,6 @@ process VARLOCIRAPTOR_INDEX {
 
 process VARLOCIRAPTOR_MERGE {
     label 'process_low'
-    label 'process_low_memory'
-    label 'process_very_short'
     tag "${meta.pair_id}"
     container "${params.container_bcftools}"
     publishDir { "${params.outdir}/${meta.donor}/pairs/${meta.pair_dir}/variant_calling" }, mode: 'copy'

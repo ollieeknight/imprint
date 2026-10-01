@@ -30,26 +30,24 @@ process FASTP {
         --json ${meta.id}_${meta.run_id}_fastp.json \\
         --html ${meta.id}_${meta.run_id}_fastp.html \\
         --thread ${task.cpus}
-
     """
 }
 
 process MOSDEPTH {
     label 'process_medium'
-    label 'process_low_memory'
     tag "${meta.id}"
     container "${params.container_mosdepth}"
     publishDir { "${params.outdir}/${meta.donor}/samples/${meta.cell_type}/qc/mosdepth" }, mode: 'copy'
 
     input:
     tuple val(meta), path(bam), path(bai)
+    path(calling_bed)
 
     output:
     tuple val(meta), path("${meta.id}.*"), emit: cov
 
     script:
-    def effective_bed = params.off_target ? params.padded_intervals_bed : params.intervals_bed
-    def bed_flag      = params.genome ? '' : "-b ${effective_bed}"
+    def bed_flag      = calling_bed ? "-b ${calling_bed}" : ''
     def quantize      = params.genome ? '0:1:5:10:20:30:50:' : '0:1:5:10:20:50:100:500:'
     """
     mosdepth \\
@@ -60,20 +58,18 @@ process MOSDEPTH {
         --quantize ${quantize} \\
         ${meta.id} \\
         ${bam}
-
     """
 }
 
 process MULTIQC {
-    label 'process_low'
-    label 'process_high_memory'
-    label 'process_short'
+    label 'process_medium'
     tag 'cohort'
     container "${params.container_multiqc}"
     publishDir "${params.outdir}/cohort/multiqc", mode: 'copy'
 
     input:
     path(reports, stageAs: 'reports/?/*')
+    path(multiqc_config)
 
     output:
     path "multiqc_report.html",  emit: report
@@ -81,8 +77,7 @@ process MULTIQC {
 
     script:
     """
-    multiqc reports/ --outdir . --filename multiqc_report.html --config ${params.multiqc_config}
-
+    multiqc reports/ --outdir . --filename multiqc_report.html --config ${multiqc_config}
     """
 }
 
@@ -94,33 +89,34 @@ process VERIFYBAMID2 {
 
     input:
     tuple val(meta), path(bam), path(bai)
+    tuple path(fasta), path(fai), path(dict)
 
     output:
     tuple val(meta), path("${meta.id}.selfSM"), emit: selfsm
 
     script:
+    // The SVD panels ship inside the container, so they stay as paths.
     def svd_prefix = params.genome ? params.verifybamid2_svd_wgs : params.verifybamid2_svd
     """
     verifybamid2 \\
         --SVDPrefix "${svd_prefix}" \\
-        --Reference "${params.ref_fasta}" \\
+        --Reference "${fasta}" \\
         --BamFile   "${bam}" \\
         --Output    ${meta.id} \\
         --NumThread ${task.cpus} \\
         --DisableSanityCheck
-
     """
 }
 
 process SOMALIER_EXTRACT {
     label 'process_low'
-    label 'process_low_memory'
-    label 'process_short'
     tag "${meta.id}"
     container "${params.container_somalier}"
 
     input:
     tuple val(meta), path(bam), path(bai)
+    tuple path(fasta), path(fai), path(dict)
+    tuple path(sites_vcf), path(sites_tbi)
 
     output:
     path("${meta.id}.somalier"), emit: extracted
@@ -129,17 +125,14 @@ process SOMALIER_EXTRACT {
     """
     somalier extract \\
         -d . \\
-        --sites "${params.somalier_sites}" \\
-        -f "${params.ref_fasta}" \\
+        --sites "${sites_vcf}" \\
+        -f "${fasta}" \\
         "${bam}"
-
     """
 }
 
 process SOMALIER_RELATE {
     label 'process_low'
-    label 'process_low_memory'
-    label 'process_short'
     tag 'cohort'
     container "${params.container_somalier}"
     publishDir "${params.outdir}/cohort/somalier", mode: 'copy'
@@ -167,7 +160,9 @@ process RIKER_QC {
     publishDir { "${params.outdir}/${meta.donor}/samples/${meta.cell_type}/qc/riker" }, mode: 'copy'
 
     input:
-    tuple val(meta), path(bam), path(bai), path(bait_intervals, stageAs: 'baits.bed'), path(target_intervals, stageAs: 'targets.bed')
+    tuple val(meta), path(bam), path(bai)
+    tuple path(fasta), path(fai), path(dict)
+    tuple path(bait_intervals, stageAs: 'baits.bed'), path(target_intervals, stageAs: 'targets.bed')
 
     output:
     tuple val(meta), path("${meta.id}.*.txt"), emit: metrics
@@ -178,7 +173,7 @@ process RIKER_QC {
         """
         riker multi \\
             -i "${bam}" \\
-            -r "${params.ref_fasta}" \\
+            -r "${fasta}" \\
             -o "${meta.id}" \\
             --tools wgs alignment isize gcbias basic \\
             --threads ${task.cpus}
@@ -187,7 +182,7 @@ process RIKER_QC {
         """
         riker multi \\
             -i "${bam}" \\
-            -r "${params.ref_fasta}" \\
+            -r "${fasta}" \\
             -o "${meta.id}" \\
             --tools hybcap alignment isize gcbias basic \\
             --hybcap::baits "${bait_intervals}" \\
@@ -198,29 +193,28 @@ process RIKER_QC {
 }
 
 process PER_BASE_ERROR_RATE {
-    label 'process_low'
-    label 'process_high_memory'
+    label 'process_medium'
     tag "${meta.id}"
     container "${params.container_align}"
-    publishDir { "${params.outdir}/${meta.donor}/samples/${meta.cell_type}/qc/fgbio" },
-        mode: 'copy'
+    publishDir { "${params.outdir}/${meta.donor}/samples/${meta.cell_type}/qc/fgbio" }, mode: 'copy'
 
     input:
     tuple val(meta), path(bam), path(bai)
+    tuple path(fasta), path(fai), path(dict)
+    tuple path(dbsnp), path(dbsnp_tbi)
 
     output:
     tuple val(meta), path("${meta.id}.error_rate_by_read_position.txt"), emit: metrics
 
     script:
-    def total_gb     = task.memory ? task.memory.toGiga() : 16
-    def mem_gb       = Math.max(4, total_gb - 4)
-    def variants_arg = params.dbsnp ? "--variants \"${params.dbsnp}\"" : ""
+    def total_gb = task.memory ? task.memory.toGiga() : 16
+    def mem_gb   = Math.max(4, total_gb - 4)
     """
     fgbio -Xmx${mem_gb}g --compression=1 --async-io=true ErrorRateByReadPosition \\
         --input   "${bam}" \\
         --output  "${meta.id}" \\
-        --ref     "${params.ref_fasta}" \\
+        --ref     "${fasta}" \\
         --min-mapping-quality 20 \\
-        ${variants_arg}
+        --variants "${dbsnp}"
     """
 }

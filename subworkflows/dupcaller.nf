@@ -1,81 +1,43 @@
 include { DUPCALLER_CALL; DUPCALLER_ESTIMATE; DUPCALLER_SUMMARIZE } from '../modules/dupcaller'
-include { VEP_ANNOTATE } from '../modules/annotation'
+include { VEP } from './annotation'
+include { fastaRef; indexed; listParam; effectiveMaxZeroQualFraction } from './common'
 
 workflow DUPCALLER {
     take:
-        ch_paired_bams
-        noiseMasks          // list of noise-mask VCF paths, possibly empty
-        maxZeroQualFraction
+        ch_paired_bams // [meta, tumor_bam, tumor_bai, normal_bam, normal_bai]
 
     main:
-        if (params.dupcaller) {
-            DUPCALLER_CALL(
-                ch_paired_bams,
-                file(params.ref_fasta),
-                file(params.genome_fai),
-                file(params.dupcaller_ref_h5),
-                file(params.dupcaller_tn_h5),
-                file(params.dupcaller_hp_h5),
-                file(params.dupcaller_str_h5),
-                file(params.dupcaller_dbs_h5),
-                file(params.dupcaller_germline_vcf),
-                file("${params.dupcaller_germline_vcf}.tbi"),
-                noiseMasks.collect { mask -> file(mask) },
-                noiseMasks.collect { mask -> file("${mask}.tbi") },
-                params.dupcaller_indel_epon ? file(params.dupcaller_indel_epon) : [],
-                params.dupcaller_indel_epon ? file("${params.dupcaller_indel_epon}.tbi") : [],
-                file(params.intervals_bed),
-                maxZeroQualFraction
-            )
+        def fasta = fastaRef()
+        def h5_indexes = [params.dupcaller_ref_h5, params.dupcaller_tn_h5, params.dupcaller_hp_h5, params.dupcaller_str_h5, params.dupcaller_dbs_h5]
+            .collect { h5 -> file(h5) }
+        def noise_masks = listParam(params.dupcaller_noise_masks)
 
-            DUPCALLER_ESTIMATE(
-                DUPCALLER_CALL.out.calls,
-                file(params.ref_fasta),
-                file(params.dupcaller_ref_h5),
-                file(params.dupcaller_tn_h5),
-                file(params.dupcaller_hp_h5),
-                file(params.dupcaller_str_h5),
-                file(params.dupcaller_dbs_h5)
-            )
+        DUPCALLER_CALL(
+            ch_paired_bams,
+            fasta,
+            h5_indexes,
+            indexed(params.dupcaller_germline_vcf),
+            noise_masks.collect { mask -> file(mask) },
+            noise_masks.collect { mask -> file("${mask}.tbi") },
+            indexed(params.dupcaller_indel_epon),
+            file(params.intervals_bed),
+            effectiveMaxZeroQualFraction()
+        )
+        DUPCALLER_ESTIMATE(DUPCALLER_CALL.out.calls, fasta, h5_indexes)
+        DUPCALLER_SUMMARIZE(DUPCALLER_ESTIMATE.out.sample_dir.map { _meta, dir -> dir }.collect(sort: { a, b -> a.name <=> b.name }))
 
-            DUPCALLER_SUMMARIZE(
-                DUPCALLER_ESTIMATE.out.sample_dir.map { _meta, dir -> dir }.collect(sort: { a, b -> a.name <=> b.name })
-            )
-
-            def ch_vep_input = DUPCALLER_CALL.out.calls.flatMap { meta, dir ->
-                [['sbs', "SBS/${meta.pair_id}_sbs.vcf.gz"],
-                 ['indel', "INDEL/${meta.pair_id}_indel.vcf.gz"]].collect { mutation_type, relative ->
+        VEP(
+            DUPCALLER_CALL.out.calls.flatMap { meta, dir ->
+                ['sbs': "SBS/${meta.pair_id}_sbs.vcf.gz", 'indel': "INDEL/${meta.pair_id}_indel.vcf.gz"].collect { mutation_type, relative ->
                     [meta, mutation_type, dir.resolve(relative), dir.resolve("${relative}.tbi")]
                 }
             }
-
-            VEP_ANNOTATE(
-                ch_vep_input,
-                file(params.spliceai_snv_vcf),
-                file("${params.spliceai_snv_vcf}.tbi"),
-                file(params.spliceai_indel_vcf ?: params.spliceai_snv_vcf),
-                file("${params.spliceai_indel_vcf ?: params.spliceai_snv_vcf}.tbi"),
-                file(params.dbnsfp_gz),
-                file("${params.dbnsfp_gz}.tbi")
-            )
-
-            ch_annotated = VEP_ANNOTATE.out.vcf
-            ch_calls = DUPCALLER_CALL.out.calls
-            ch_burden = DUPCALLER_ESTIMATE.out.burden
-            ch_summary = DUPCALLER_SUMMARIZE.out.summary
-            ch_sbs96 = DUPCALLER_SUMMARIZE.out.sbs96
-        } else {
-            ch_annotated = channel.empty()
-            ch_calls = channel.empty()
-            ch_burden = channel.empty()
-            ch_summary = channel.empty()
-            ch_sbs96 = channel.empty()
-        }
+        )
 
     emit:
-        annotated = ch_annotated
-        calls = ch_calls
-        burden = ch_burden
-        cohort_summary = ch_summary
-        cohort_sbs96 = ch_sbs96
+        annotated      = VEP.out
+        calls          = DUPCALLER_CALL.out.calls
+        burden         = DUPCALLER_ESTIMATE.out.burden
+        cohort_summary = DUPCALLER_SUMMARIZE.out.summary
+        cohort_sbs96   = DUPCALLER_SUMMARIZE.out.sbs96
 }

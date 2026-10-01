@@ -1,12 +1,13 @@
-process CALL {
+process MUTECT2_CALL {
     label 'process_low'
-    label 'process_high_memory'
-    label 'process_long'
     tag "${meta.pair_id}"
     container "${params.container_gatk}"
 
     input:
     tuple val(meta), path(tumor_bam), path(tumor_bai), path(normal_bam), path(normal_bai), path(interval_gz), path(interval_tbi)
+    tuple path(fasta), path(fai), path(dict)
+    tuple path(germline_vcf), path(germline_tbi)
+    tuple path(pon_vcf), path(pon_tbi)
 
     output:
     tuple val(meta), path("${meta.tumor_id}_mutect2.*.vcf.gz"),      path("${meta.tumor_id}_mutect2.*.vcf.gz.tbi"), emit: unfiltered_vcf
@@ -14,18 +15,17 @@ process CALL {
     tuple val(meta), path("${meta.tumor_id}_*_f1r2.tar.gz"),                                                       emit: f1r2
 
     script:
-    def mem_gb            = task.memory ? task.memory.toGiga() - 2 : 14
-    // null autodetects short inserts from fastp.
+    def mem_gb           = task.memory ? task.memory.toGiga() - 2 : 14
     def auto_short       = (params.filter_soft_clips != false) && (meta.short_inserts ?: false)
     def soft_clip_filter = params.filter_soft_clips == true || auto_short
         ? '--dont-use-soft-clipped-bases' : ''
     """
     gatk --java-options "-Xmx${mem_gb}g" Mutect2 \\
-        -R "${params.ref_fasta}" \\
+        -R "${fasta}" \\
         -I "${tumor_bam}"  --tumor-sample  "${meta.tumor_id}" \\
         -I "${normal_bam}" --normal-sample "${meta.normal_id}" \\
-        --germline-resource "${params.gnomad_germline_resource_vcf}" \\
-        --panel-of-normals "${params.pon_vcf}" \\
+        --germline-resource "${germline_vcf}" \\
+        --panel-of-normals "${pon_vcf}" \\
         -L "${interval_gz}" \\
         --f1r2-tar-gz "${meta.tumor_id}_${interval_gz.simpleName}_f1r2.tar.gz" \\
         -O "${meta.tumor_id}_mutect2.${interval_gz.simpleName}.unfiltered.vcf.gz" \\
@@ -39,13 +39,14 @@ process CALL {
     """
 }
 
-process PILEUP {
+process MUTECT2_PILEUP {
     label 'process_low'
     tag "${sample_id}"
     container "${params.container_gatk}"
 
     input:
     tuple val(meta), val(role), val(sample_id), path(bam), path(bai), path(interval_gz), path(interval_tbi)
+    tuple path(pileup_vcf), path(pileup_tbi)
 
     output:
     tuple val(meta), val(role), val(sample_id), path("${sample_id}_${interval_gz.simpleName}.pileup.table"), emit: pileup
@@ -55,20 +56,20 @@ process PILEUP {
     """
     gatk --java-options "-Xmx${mem_gb}g" GetPileupSummaries \\
         -I "${bam}" \\
-        -V "${params.gnomad_pileup_summaries_vcf}" \\
+        -V "${pileup_vcf}" \\
         -L "${interval_gz}" \\
         -O "${sample_id}_${interval_gz.simpleName}.pileup.table"
     """
 }
 
-process GATHER_PILEUPS {
+process MUTECT2_GATHER_PILEUPS {
     label 'process_low'
-    label 'process_very_short'
-    tag "${meta.pair_id}"
+    tag "${sample_id}"
     container "${params.container_gatk}"
 
     input:
     tuple val(meta), val(role), val(sample_id), path(pileup_tables)
+    tuple path(fasta), path(fai), path(dict)
 
     output:
     tuple val(meta), val(role), val(sample_id), path("${sample_id}_pileups.table"), emit: pileup
@@ -79,14 +80,13 @@ process GATHER_PILEUPS {
     """
     gatk --java-options "-Xmx${mem_gb}g" GatherPileupSummaries \\
         ${input_args} \\
-        --sequence-dictionary "${params.ref_dict}" \\
+        --sequence-dictionary "${dict}" \\
         -O "${sample_id}_pileups.table"
     """
 }
 
-process CONTAMINATION {
+process MUTECT2_CONTAMINATION {
     label 'process_low'
-    label 'process_very_short'
     tag "${meta.pair_id}"
     container "${params.container_gatk}"
     publishDir { "${params.outdir}/${meta.donor}/pairs/${meta.pair_dir}/variant_calling/raw" }, mode: 'copy'
@@ -109,10 +109,8 @@ process CONTAMINATION {
     """
 }
 
-process MERGE_STATS {
+process MUTECT2_MERGE_STATS {
     label 'process_low'
-    label 'process_low_memory'
-    label 'process_very_short'
     tag "${meta.pair_id}"
     container "${params.container_gatk}"
 
@@ -132,7 +130,26 @@ process MERGE_STATS {
     """
 }
 
-process FILTER {
+process MUTECT2_MERGE_VCFS {
+    label 'process_low'
+    tag "${meta.pair_id}"
+    container "${params.container_bcftools}"
+    publishDir { "${params.outdir}/${meta.donor}/pairs/${meta.pair_dir}/variant_calling/raw" }, mode: 'copy'
+
+    input:
+    tuple val(meta), path(vcfs), path(tbis)
+
+    output:
+    tuple val(meta), path("${meta.pair_id}.mutect2.unfiltered.vcf.gz"), path("${meta.pair_id}.mutect2.unfiltered.vcf.gz.tbi"), emit: vcf
+
+    script:
+    """
+    bcftools concat -a -D ${vcfs} -O z -o "${meta.pair_id}.mutect2.unfiltered.vcf.gz"
+    tabix -p vcf "${meta.pair_id}.mutect2.unfiltered.vcf.gz"
+    """
+}
+
+process MUTECT2_FILTER {
     label 'process_low'
     tag "${meta.pair_id}"
     container "${params.container_gatk}"
@@ -140,21 +157,21 @@ process FILTER {
 
     input:
     tuple val(meta), path(unfiltered_vcf), path(unfiltered_tbi), path(f1r2s), path(contamination), path(segments), path(stats)
+    tuple path(fasta), path(fai), path(dict)
 
     output:
     tuple val(meta), path("${meta.pair_id}.mutect2.filtered.vcf.gz"), path("${meta.pair_id}.mutect2.filtered.vcf.gz.tbi"), emit: vcf
 
     script:
-    def mem_gb        = task.memory ? task.memory.toGiga() - 2 : 6
-    def f1r2_inputs   = f1r2s.collect { v -> "-I ${v}" }.join(' ')
-    // Keep FilterMutectCalls' native evidence and artefact filters.
+    def mem_gb      = task.memory ? task.memory.toGiga() - 2 : 6
+    def f1r2_inputs = f1r2s.collect { v -> "-I ${v}" }.join(' ')
     """
     gatk --java-options "-Xmx${mem_gb}g" LearnReadOrientationModel \\
         ${f1r2_inputs} \\
         -O "${meta.tumor_id}_read_orientation_model.tar.gz"
 
     gatk --java-options "-Xmx${mem_gb}g" FilterMutectCalls \\
-        -R "${params.ref_fasta}" \\
+        -R "${fasta}" \\
         -V "${unfiltered_vcf}" \\
         --stats "${stats}" \\
         --ob-priors "${meta.tumor_id}_read_orientation_model.tar.gz" \\
@@ -163,85 +180,5 @@ process FILTER {
         -O "${meta.pair_id}.mutect2.filtered.vcf.gz"
 
     gatk IndexFeatureFile -I "${meta.pair_id}.mutect2.filtered.vcf.gz"
-    """
-}
-
-process BASE_RECALIBRATOR {
-    label 'process_low'
-    label 'process_high_memory'
-    label 'process_long'
-    tag "${sample_id}"
-    container "${params.container_gatk}"
-    publishDir {
-        def cell_type = role == 'tumour' ? meta.tumor_cell_type : meta.normal_cell_type
-        "${params.outdir}/${meta.donor}/samples/${cell_type}/qc/bqsr"
-    }, mode: 'copy'
-
-    input:
-    tuple val(meta), val(role), val(sample_id), path(bam), path(bai)
-
-    output:
-    tuple val(meta), val(role), val(sample_id), path("${sample_id}_recal.table"), emit: recal_table
-
-    script:
-    def mem_gb        = task.memory ? task.memory.toGiga() - 2 : 8
-    def intervals_flag = params.genome ? '' : "-L \"${params.off_target ? params.padded_intervals_bed : params.intervals_bed}\""
-    """
-    gatk --java-options "-Xmx${mem_gb}g" BaseRecalibrator \\
-        -I "${bam}" \\
-        -R "${params.ref_fasta}" \\
-        ${intervals_flag} \\
-        --known-sites "${params.dbsnp}" \\
-        --known-sites "${params.known_indels_mills}" \\
-        --known-sites "${params.known_snps_1000g}" \\
-        -O "${sample_id}_recal.table"
-
-    """
-}
-
-process APPLY_BQSR {
-    label 'process_low'
-    label 'process_high_memory'
-    label 'process_long'
-    tag "${sample_id}"
-    container "${params.container_gatk}"
-
-    input:
-    tuple val(meta), val(role), val(sample_id), path(bam), path(bai), path(recal_table)
-
-    output:
-    tuple val(meta), val(role), val(sample_id), path("${sample_id}_bqsr.bam"), path("${sample_id}_bqsr.bam.bai"), emit: bam
-
-    script:
-    def mem_gb = task.memory ? task.memory.toGiga() - 2 : 8
-    """
-    gatk --java-options "-Xmx${mem_gb}g" ApplyBQSR \\
-        -R "${params.ref_fasta}" \\
-        -I "${bam}" \\
-        --bqsr-recal-file "${recal_table}" \\
-        -O "${sample_id}_bqsr.bam"
-
-    mv "${sample_id}_bqsr.bai" "${sample_id}_bqsr.bam.bai"
-    """
-}
-
-process MERGE_VCFS {
-    label 'process_low'
-    label 'process_low_memory'
-    label 'process_very_short'
-    tag "${meta.pair_id}"
-    container "${params.container_bcftools}"
-    publishDir { "${params.outdir}/${meta.donor}/pairs/${meta.pair_dir}/variant_calling/raw" }, mode: 'copy'
-
-    input:
-    tuple val(meta), val(caller), path(vcfs), path(tbis)
-
-    output:
-    tuple val(meta), path("${meta.pair_id}.${caller}.unfiltered.vcf.gz"), path("${meta.pair_id}.${caller}.unfiltered.vcf.gz.tbi"), emit: vcf
-
-    script:
-    """
-    bcftools concat -a -D ${vcfs} -O z -o "${meta.pair_id}.${caller}.unfiltered.vcf.gz"
-    tabix -p vcf "${meta.pair_id}.${caller}.unfiltered.vcf.gz"
     """
 }

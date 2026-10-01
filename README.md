@@ -1,6 +1,6 @@
 # imprint
 
-imprint calls somatic variants between FACS-sorted immune-cell populations from the same donor, using bulk WES, WGS or xGen UDSeq duplex data. Each donor has one reference population (`status=0`, called the normal) and one or more populations compared against it (`status=1`, the tumour), healthy donors included. The normal is a cell population, not a germline control, and can share clonal variants with the tumour.
+imprint calls somatic variants between FACS-sorted immune-cell populations from the same donor, using bulk WES, WGS or xGen UDSeq duplex data. Each donor has one reference population (`status=0`, called the normal) and one or more populations compared against it (`status=1`, the tumor), healthy donors included. The normal is a cell population, not a germline control, and can share clonal variants with the tumor.
 
 It is a Nextflow pipeline built for the Charité SC HPC (SLURM + Apptainer). Paths and resources in `conf/` are for that cluster.
 
@@ -15,7 +15,7 @@ HC01,NKG2A,1,/data/HC01_NKG2A_R1.fastq.gz,/data/HC01_NKG2A_R2.fastq.gz
 HC01,NKG2C,1,/data/HC01_NKG2C_R1.fastq.gz,/data/HC01_NKG2C_R2.fastq.gz
 ```
 
-`patient` and `cell_type` must be alphanumeric, each donor needs exactly one normal, and each FASTQ may appear only once. Rows that share `patient` and `cell_type` are lanes of one sample and are merged.
+`patient` and `cell_type` may contain letters, digits, `_` and `-` (starting with a letter or digit) and must not combine into duplicate IDs, each donor needs exactly one normal, and each FASTQ may appear only once. Rows that share `patient` and `cell_type` are lanes of one sample and are merged.
 
 Then run:
 
@@ -67,7 +67,7 @@ cohort/
   samples/{cell_type}/
     alignment/               # CRAM
     qc/
-  pairs/{tumour}_v_{normal}/
+  pairs/{tumor}_v_{normal}/
     variant_calling/         # {pair_id}.somatic.vcf.gz; per-caller files in raw/
     dupcaller/               # calls/, burden/, annotated/
 ```

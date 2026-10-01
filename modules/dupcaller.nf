@@ -1,6 +1,5 @@
 process DUPCALLER_TRIM_LANE {
     label 'process_low'
-    label 'process_long'
     tag "${meta.id}"
     container "${params.container_dupcaller}"
     publishDir { "${params.outdir}/${meta.donor}/samples/${meta.cell_type}/qc/dupcaller" }, mode: 'copy', pattern: '*_barcode_metrics.json'
@@ -27,15 +26,14 @@ process DUPCALLER_TRIM_LANE {
 }
 
 process DUPCALLER_ALIGN_LANE {
-    label 'process_dynamic'
-    label 'process_very_long'
     tag "${meta.id}"
     container "${params.container_align}"
-    memory { 48.GB }
+    memory 48.GB
     cpus   { (reads1.size() + reads2.size()) < 5.GB ? 8 : (reads1.size() + reads2.size()) < 15.GB ? 12 : (reads1.size() + reads2.size()) < 60.GB ? 16 : 24 }
 
     input:
     tuple val(meta), path(reads1), path(reads2)
+    tuple val(bwa_prefix), path(bwa_index)
 
     output:
     tuple val(meta), path("${meta.id}_${meta.run_id}.dupcaller.unsorted.bam"), emit: bam
@@ -44,18 +42,16 @@ process DUPCALLER_ALIGN_LANE {
     """
     bwa-mem3 mem -C -K 100000000 -t ${task.cpus} \
         -R "@RG\\tID:${meta.id}.${meta.run_id}\\tSM:${meta.id}\\tPL:ILLUMINA\\tLB:${meta.id}" \
-        "${params.bwa_mem3_index}" "${reads1}" "${reads2}" \
+        "${bwa_prefix}" "${reads1}" "${reads2}" \
       | samtools view -1 -@ ${task.cpus} -o "${meta.id}_${meta.run_id}.dupcaller.unsorted.bam"
     """
 }
 
 process DUPCALLER_SORT_LANE {
-    label 'process_dynamic'
-    label 'process_very_long'
     tag "${meta.id}"
     container "${params.container_samtools}"
     memory { bam.size() < 20.GB ? 24.GB : 48.GB }
-    cpus   { 8 }
+    cpus   8
 
     input:
     tuple val(meta), path(bam)
@@ -74,8 +70,6 @@ process DUPCALLER_SORT_LANE {
 
 process DUPCALLER_MARK_DUPLICATES {
     label 'process_high'
-    label 'process_low_memory'
-    label 'process_long'
     tag "${meta.id}"
     container "${params.container_gatk}"
     publishDir { "${params.outdir}/${meta.donor}/samples/${meta.cell_type}/qc/dupcaller" }, mode: 'copy', pattern: '*_dupcaller_markdup_metrics.txt'
@@ -107,7 +101,6 @@ process DUPCALLER_MARK_DUPLICATES {
 
 process DUPCALLER_VALIDATE_BAM {
     label 'process_medium'
-    label 'process_long'
     tag "${meta.id}"
     container "${params.container_align}"
     publishDir { "${params.outdir}/${meta.donor}/samples/${meta.cell_type}/qc/dupcaller" }, mode: 'copy', pattern: '*_dupcaller_tag_validation.tsv'
@@ -132,7 +125,6 @@ process DUPCALLER_VALIDATE_BAM {
 
 process DUPCALLER_VALIDATE_CRAM {
     label 'process_medium'
-    label 'process_long'
     tag "${meta.id}"
     container "${params.container_align}"
     publishDir { "${params.outdir}/${meta.donor}/samples/${meta.cell_type}/qc/dupcaller" }, mode: 'copy'
@@ -141,6 +133,7 @@ process DUPCALLER_VALIDATE_CRAM {
     tuple val(meta), path(cram), path(crai)
     path(allowlist)
     path(validator)
+    tuple path(fasta), path(fai), path(dict)
 
     output:
     tuple val(meta), path("${meta.id}_dupcaller_cram_tag_validation.tsv"), emit: metrics
@@ -148,34 +141,27 @@ process DUPCALLER_VALIDATE_CRAM {
     script:
     """
     samtools quickcheck -v "${cram}"
-    samtools view -@ ${task.cpus} -T "${params.ref_fasta}" "${cram}" \
+    samtools view -@ ${task.cpus} -T "${fasta}" "${cram}" \
       | awk -v allowlist="${allowlist}" -f "${validator}" \
       > "${meta.id}_dupcaller_cram_tag_validation.tsv"
     """
 }
 
 process DUPCALLER_CALL {
-    label 'process_dynamic'
-    label 'process_very_long'
+    label 'process_high'
     tag "${meta.pair_id}"
     container "${params.container_dupcaller}"
     publishDir { "${params.outdir}/${meta.donor}/pairs/${meta.pair_dir}/dupcaller" }, mode: 'copy'
 
     input:
     tuple val(meta), path(tumor_bam), path(tumor_bai), path(normal_bam), path(normal_bai)
-    path(reference)
-    path(reference_fai)
-    path(reference_h5)
-    path(trinuc_h5)
-    path(homopolymer_h5)
-    path(str_h5)
-    path(dbs_h5)
-    path(germline_vcf)
-    path(germline_tbi)
+    tuple path(fasta), path(fai), path(dict)
+    // Found by DupCaller beside the FASTA, never passed by name.
+    path(h5_indexes)
+    tuple path(germline_vcf), path(germline_tbi)
     path(noise_masks)
     path(noise_mask_indexes)
-    path(indel_epon)
-    path(indel_epon_tbi)
+    tuple path(indel_epon), path(indel_epon_tbi)
     path(region_file)
     val(max_zero_qual_fraction)
 
@@ -194,7 +180,7 @@ process DUPCALLER_CALL {
     DupCaller.py call \
         -b "${tumor_bam}" \
         -n "${normal_bam}" \
-        -f "${reference}" \
+        -f "${fasta}" \
         -g "${germline_vcf}" \
         -R targets.bed.gz \
         -o "${meta.pair_id}" \
@@ -253,7 +239,6 @@ process DUPCALLER_CALL {
 
 process DUPCALLER_ESTIMATE {
     label 'process_medium'
-    label 'process_long'
     tag "${meta.pair_id}"
     container "${params.container_dupcaller}"
     publishDir { "${params.outdir}/${meta.donor}/pairs/${meta.pair_dir}/dupcaller" }, mode: 'copy',
@@ -261,12 +246,8 @@ process DUPCALLER_ESTIMATE {
 
     input:
     tuple val(meta), path(calls)
-    path(reference)
-    path(reference_h5)
-    path(trinuc_h5)
-    path(homopolymer_h5)
-    path(str_h5)
-    path(dbs_h5)
+    tuple path(fasta), path(fai), path(dict)
+    path(h5_indexes)
 
     output:
     tuple val(meta), path('burden'),            emit: burden
@@ -274,10 +255,8 @@ process DUPCALLER_ESTIMATE {
 
     script:
     """
-    # sigProfilerPlotting caches its matplotlib figure templates inside its own
-    # package directory, which is read-only in the image. Its own environment
-    # variable redirects that cache; a task-local path also keeps concurrent
-    # pairs from writing the same pickle.
+    # SigProfilerPlotting caches templates in its read-only package dir; keep the
+    # cache task-local so concurrent pairs don't share it.
     export SIGPROFILERPLOTTING_VOLUME="\$PWD/.sigprofilerplotting"
 
     cp -rL "${calls}" "${meta.pair_id}"
@@ -285,7 +264,7 @@ process DUPCALLER_ESTIMATE {
 
     DupCaller.py estimate \
         -i "${meta.pair_id}" \
-        -f "${reference}" \
+        -f "${fasta}" \
         -r ${params.dupcaller_regions}
 
     find "${meta.pair_id}" -type f | sort > after.txt

@@ -1,7 +1,5 @@
 process STRELKA2_MERGE {
     label 'process_low'
-    label 'process_low_memory'
-    label 'process_very_short'
     tag "${meta.pair_id}"
     container "${params.container_bcftools}"
 
@@ -22,13 +20,12 @@ process STRELKA2_MERGE {
 
 process ENSEMBLE_CONSENSUS {
     label 'process_low'
-    label 'process_low_memory'
-    label 'process_very_short'
     tag "${meta.pair_id}"
     container "${params.container_bcftools}"
 
     input:
     tuple val(meta), path(mutect2_vcf), path(mutect2_tbi), path(strelka_vcf), path(strelka_tbi), path(deepsomatic_vcf), path(deepsomatic_tbi)
+    tuple path(fasta), path(fai), path(dict)
 
     output:
     tuple val(meta), path("${meta.pair_id}.consensus.vcf.gz"), path("${meta.pair_id}.consensus.vcf.gz.tbi"), emit: vcf
@@ -43,8 +40,8 @@ process ENSEMBLE_CONSENSUS {
         prefix="\${spec%%:*}"
         source_vcf="\${spec#*:}"
         bcftools view -f 'PASS' --drop-genotypes "\$source_vcf" \\
-            | bcftools norm -m-any -f "${params.ref_fasta}" \\
-            | bcftools norm --atomize --old-rec-tag MNP -f "${params.ref_fasta}" \\
+            | bcftools norm -m-any -f "${fasta}" \\
+            | bcftools norm --atomize --old-rec-tag MNP -f "${fasta}" \\
             | bcftools sort -O z -o "\${prefix}.sites.vcf.gz"
     done
 
@@ -103,12 +100,11 @@ EOF
 
 process VAFATOR {
     label 'process_medium'
-    label 'process_low_memory'
     tag "${meta.pair_id}"
     container "${params.container_vafator}"
 
     input:
-    tuple val(meta), path(consensus_vcf), path(consensus_tbi), path(tumour_bam), path(tumour_bai), path(normal_bam), path(normal_bai)
+    tuple val(meta), path(consensus_vcf), path(consensus_tbi), path(tumor_bam), path(tumor_bai), path(normal_bam), path(normal_bai)
 
     output:
     tuple val(meta), path("${meta.pair_id}.vaf.vcf"), emit: vcf
@@ -118,7 +114,7 @@ process VAFATOR {
     vafator \\
         --input-vcf "${consensus_vcf}" \\
         --output-vcf "${meta.pair_id}.vaf.vcf" \\
-        --bam "${meta.tumor_id}" "${tumour_bam}" \\
+        --bam "${meta.tumor_id}" "${tumor_bam}" \\
         --bam "${meta.normal_id}" "${normal_bam}" \\
         --mapping-quality 20 \\
         --base-call-quality 20 \\
@@ -129,13 +125,12 @@ process VAFATOR {
 
 process MARK_ON_TARGET {
     label 'process_low'
-    label 'process_low_memory'
-    label 'process_very_short'
     tag "${meta.pair_id}"
     container "${params.container_bcftools}"
 
     input:
     tuple val(meta), path(vaf_vcf)
+    path(target_bed)
 
     output:
     tuple val(meta), path("${meta.pair_id}.vaf.vcf.gz"), path("${meta.pair_id}.vaf.vcf.gz.tbi"), emit: vcf
@@ -143,10 +138,10 @@ process MARK_ON_TARGET {
     script:
     // Off-target runs call on padded intervals; flag sites inside the unpadded targets.
     // Otherwise this only compresses and indexes Vafator's output for VEP.
-    if (params.off_target && params.intervals_bed) {
+    if (target_bed) {
         """
         printf '##INFO=<ID=ON_TARGET,Number=0,Type=Flag,Description="Variant overlaps capture target intervals (non-padded)">\\n' > on_target_hdr.txt
-        awk 'BEGIN{OFS="\\t"} !/^#/{print \$1, \$2+1, \$3}' "${params.intervals_bed}" | bgzip -c > on_target.bed.gz
+        awk 'BEGIN{OFS="\\t"} !/^#/{print \$1, \$2+1, \$3}' "${target_bed}" | bgzip -c > on_target.bed.gz
         tabix -s1 -b2 -e3 -c '#' on_target.bed.gz
         bcftools annotate --mark-sites +ON_TARGET -a on_target.bed.gz -c CHROM,FROM,TO -h on_target_hdr.txt \\
             "${vaf_vcf}" -O z -o "${meta.pair_id}.vaf.vcf.gz"
@@ -162,7 +157,6 @@ process MARK_ON_TARGET {
 
 process VEP_ANNOTATE {
     label 'process_high'
-    label 'process_high_memory'
     tag "${meta.pair_id}"
     container "${params.container_vep}"
     publishDir { "${params.outdir}/${meta.donor}/pairs/${meta.pair_dir}/dupcaller/annotated" },
@@ -170,26 +164,25 @@ process VEP_ANNOTATE {
 
     input:
     tuple val(meta), val(mutation_type), path(vcf), path(tbi)
-    // Distinct staging names are required in SNV-only mode because the same
-    // physical VCF/index satisfy both mandatory SpliceAI plugin arguments.
-    path spliceai_snv_vcf,   stageAs: 'spliceai.snv.vcf.gz'
-    path spliceai_snv_tbi,   stageAs: 'spliceai.snv.vcf.gz.tbi'
-    path spliceai_indel_vcf, stageAs: 'spliceai.indel.vcf.gz'
-    path spliceai_indel_tbi, stageAs: 'spliceai.indel.vcf.gz.tbi'
-    path dbnsfp_gz,           stageAs: 'dbNSFP.gz'
-    path dbnsfp_tbi,          stageAs: 'dbNSFP.gz.tbi'
+    tuple path(fasta), path(fai), path(dict)
+    tuple path(vep_cache), path(vep_plugins)
+    // Fixed names: in SNV-only mode the SNV VCF fills both SpliceAI arguments.
+    tuple path(spliceai_snv, stageAs: 'spliceai.snv.vcf.gz'), path(spliceai_snv_tbi, stageAs: 'spliceai.snv.vcf.gz.tbi'),
+          path(spliceai_indel, stageAs: 'spliceai.indel.vcf.gz'), path(spliceai_indel_tbi, stageAs: 'spliceai.indel.vcf.gz.tbi')
+    tuple path(dbnsfp, stageAs: 'dbNSFP.gz'), path(dbnsfp_tbi, stageAs: 'dbNSFP.gz.tbi')
+    tuple path(alphamissense), path(alphamissense_tbi)
+    tuple path(gnomad_exomes), path(gnomad_exomes_tbi), path(gnomad_genomes), path(gnomad_genomes_tbi)
+    tuple path(cosmic), path(cosmic_tbi), path(cosmic_noncoding), path(cosmic_noncoding_tbi)
 
     output:
     tuple val(meta), val(mutation_type), path("${meta.pair_id}.${mutation_type}.vcf.gz"), path("${meta.pair_id}.${mutation_type}.vcf.gz.tbi"), emit: vcf
 
     script:
-    def cosmic_flag = params.cosmic_vcf ? "--custom ${params.cosmic_vcf},COSMIC,vcf,exact,0,ID" : ''
-    def cosmic_noncoding_flag = params.cosmic_noncoding_vcf ? "--custom ${params.cosmic_noncoding_vcf},COSMIC_NONCODING,vcf,exact,0,ID" : ''
     def custom_flags = [
-        "--custom ${params.gnomad_exomes_vep_vcf},gnomADv4e,vcf,exact,0,AF,AN",
-        "--custom ${params.gnomad_genomes_vep_vcf},gnomADv4g,vcf,exact,0,AF,AN",
-        cosmic_flag,
-        cosmic_noncoding_flag,
+        "--custom ${gnomad_exomes},gnomADv4e,vcf,exact,0,AF,AN",
+        "--custom ${gnomad_genomes},gnomADv4g,vcf,exact,0,AF,AN",
+        cosmic ? "--custom ${cosmic},COSMIC,vcf,exact,0,ID" : '',
+        cosmic_noncoding ? "--custom ${cosmic_noncoding},COSMIC_NONCODING,vcf,exact,0,ID" : '',
     ].findAll { v -> v }.join(" \\\n        ")
     """
     if [ \$(zcat "${vcf}" | grep -v "^#" | wc -l) -eq 0 ]; then
@@ -202,8 +195,8 @@ process VEP_ANNOTATE {
         -i "${vcf}" \\
         -o "${meta.pair_id}.vep.vcf.gz" \\
         --vcf --compress_output bgzip --pick \\
-        --offline --dir_cache "${params.vep_cache}" \\
-        --fasta "${params.ref_fasta}" \\
+        --offline --dir_cache "${vep_cache}" \\
+        --fasta "${fasta}" \\
         --species homo_sapiens \\
         --assembly GRCh38 \\
         --sift b \\
@@ -217,10 +210,10 @@ process VEP_ANNOTATE {
         --biotype \\
         --variant_class \\
         --mane \\
-        --dir_plugins "${params.vep_plugins_dir}" \\
-        --plugin AlphaMissense,file="${params.alphamissense_tsv}" \\
-        --plugin SpliceAI,snv="${spliceai_snv_vcf}",indel="${spliceai_indel_vcf}" \\
-        --plugin dbNSFP,${dbnsfp_gz},REVEL_score \\
+        --dir_plugins "${vep_plugins}" \\
+        --plugin AlphaMissense,file="${alphamissense}" \\
+        --plugin SpliceAI,snv="${spliceai_snv}",indel="${spliceai_indel}" \\
+        --plugin dbNSFP,${dbnsfp},REVEL_score \\
         --plugin NMD \\
         --plugin SpliceRegion \\
         --plugin pLI \\
