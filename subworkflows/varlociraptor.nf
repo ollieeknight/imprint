@@ -23,26 +23,24 @@ workflow VARLOCIRAPTOR {
                 [meta.pair_id, scenario]
             }
 
-        def ch_sample_bams = ch_paired_bams.flatMap { meta, tb, tbai, nb, nbai ->
-            [
-                [[meta.pair_id, 'tumour'], meta, 'tumour', meta.tumor_id,  tb, tbai],
-                [[meta.pair_id, 'normal'], meta, 'normal', meta.normal_id, nb, nbai],
-            ]
-        }
+        def ch_tumours = ch_paired_bams.map { meta, tb, tbai, _nb, _nbai -> [meta, 'tumour', meta.tumor_id, tb, tbai] }
 
-        VARLOCIRAPTOR_ALIGNMENT_PROPERTIES(
-            ch_sample_bams.map { _key, meta, role, sample_id, bam, bai -> [meta, role, sample_id, bam, bai] }
-        )
+        // Alignment properties run once per normal, not per pair; preprocessing stays
+        // per pair because each pair has its own candidates.
+        def ch_normals = ch_paired_bams
+            .map { meta, _tb, _tbai, nb, nbai -> [groupKey(meta.normal_id, meta.tumour_count), meta, nb, nbai] }
+            .groupTuple(by: 0)
+            .map { normal_id, metas, nbs, nbais -> [metas.min { m -> m.pair_id }, 'normal', normal_id.toString(), nbs[0], nbais[0]] }
 
-        def ch_alignment_properties = VARLOCIRAPTOR_ALIGNMENT_PROPERTIES.out.json
-            .map { meta, role, _sample_id, json -> [[meta.pair_id, role], json] }
+        VARLOCIRAPTOR_ALIGNMENT_PROPERTIES(ch_tumours.mix(ch_normals))
 
-        def ch_preprocess_input = ch_sample_bams
-            .map { key, meta, role, sample_id, bam, bai -> [meta.pair_id, key, meta, role, sample_id, bam, bai] }
+        def ch_preprocess_input = ch_tumours
+            .mix(ch_paired_bams.map { meta, _tb, _tbai, nb, nbai -> [meta, 'normal', meta.normal_id, nb, nbai] })
+            .map { meta, role, sample_id, bam, bai -> [meta.pair_id, meta, role, sample_id, bam, bai] }
             .combine(ch_candidates.map { meta, vcf, tbi -> [meta.pair_id, vcf, tbi] }, by: 0)
-            .map { _pair_id, key, meta, role, sample_id, bam, bai, vcf, tbi -> [key, meta, role, sample_id, bam, bai, vcf, tbi] }
-            .join(ch_alignment_properties, by: 0, failOnMismatch: true)
-            .map { _key, meta, role, sample_id, bam, bai, vcf, tbi, json -> [meta, role, sample_id, bam, bai, vcf, tbi, json] }
+            .map { _pair_id, meta, role, sample_id, bam, bai, vcf, tbi -> [sample_id, meta, role, bam, bai, vcf, tbi] }
+            .combine(VARLOCIRAPTOR_ALIGNMENT_PROPERTIES.out.json.map { _meta, _role, sample_id, json -> [sample_id, json] }, by: 0)
+            .map { sample_id, meta, role, bam, bai, vcf, tbi, json -> [meta, role, sample_id, bam, bai, vcf, tbi, json] }
 
         VARLOCIRAPTOR_PREPROCESS(ch_preprocess_input)
 

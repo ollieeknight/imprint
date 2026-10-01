@@ -3,7 +3,7 @@ include {
     VEP_ANNOTATE
     ENSEMBLE_CONSENSUS
     VAFATOR
-    TUMOR_NORMAL_FILTER
+    MARK_ON_TARGET
 } from '../modules/annotation'
 
 include { VARLOCIRAPTOR_MERGE } from '../modules/varlociraptor'
@@ -60,10 +60,10 @@ workflow ANNOTATION {
 
         VARLOCIRAPTOR(ch_paired_bams, ENSEMBLE_CONSENSUS.out.vcf, ch_sex)
 
-        TUMOR_NORMAL_FILTER(VAFATOR.out.vcf)
+        MARK_ON_TARGET(VAFATOR.out.vcf)
 
         VEP_ANNOTATE(
-            TUMOR_NORMAL_FILTER.out.vcf.map { meta, vcf, tbi -> [meta, 'somatic', vcf, tbi] },
+            MARK_ON_TARGET.out.vcf.map { meta, vcf, tbi -> [meta, 'somatic', vcf, tbi] },
             file(params.spliceai_snv_vcf),
             file("${params.spliceai_snv_vcf}.tbi"),
             file(params.spliceai_indel_vcf ?: params.spliceai_snv_vcf),

@@ -50,9 +50,9 @@ workflow SOMATIC_CALLING {
             // A normal is shared by every pair in its donor; recalibrate it once,
             // carrying the first pair's meta by name so the task hash is stable.
             ch_paired_bams
-                .map { meta, _tb, _tbai, nb, nbai -> [meta.normal_id, meta, nb, nbai] }
+                .map { meta, _tb, _tbai, nb, nbai -> [groupKey(meta.normal_id, meta.tumour_count), meta, nb, nbai] }
                 .groupTuple(by: 0)
-                .map { normal_id, metas, nbams, nbais -> [metas.min { m -> m.pair_id }, 'normal', normal_id, nbams[0], nbais[0]] }
+                .map { normal_id, metas, nbams, nbais -> [metas.min { m -> m.pair_id }, 'normal', normal_id.toString(), nbams[0], nbais[0]] }
                 .set { ch_normal_for_bqsr }
 
             ch_normal_for_bqsr.mix(ch_tumour_for_bqsr).set { ch_bams_for_bqsr }

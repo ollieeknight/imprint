@@ -3,7 +3,7 @@ include { MUTECT2_NORMAL_ONLY; GENOMICSDB_IMPORT_PON; CREATE_PON } from '../modu
 workflow PON_GENERATION {
     take:
     ch_normal_bams  // tuple val(meta), path(cram), path(crai)
-    normal_count    // int computed at parse time; avoids toList() firing early on pipeline error
+    normal_count    // from the samplesheet, so the PoN branch is chosen before any task runs
 
     main:
     ch_pon = channel.empty()

@@ -23,18 +23,12 @@ def groupLanes(ch) {
         .map { _id, metas, bams -> [sampleMeta(metas[0]), bams.sort { b -> b.name }] }
 }
 
+// A missing or zero insert-size peak counts as long inserts.
 def fastpStats(json, int trimFront) {
-    try {
-        def j    = new groovy.json.JsonSlurper().parse(json)
-        def mean = j?.summary?.before_filtering?.read1_mean_length
-        def peak = (j?.insert_size?.peak ?: 999) as Integer
-        [
-            short_insert: peak <= ((mean ?: 150) as Integer) - trimFront - 10,
-            read_length:  ((mean ?: 100) as Integer) - trimFront,
-        ]
-    } catch (_e) {
-        [short_insert: false, read_length: 100]
-    }
+    def j    = new groovy.json.JsonSlurper().parse(json)
+    def mean = j.summary.before_filtering.read1_mean_length as Integer
+    def peak = (j.insert_size?.peak ?: 999) as Integer
+    [short_insert: peak <= mean - trimFront - 10, read_length: mean - trimFront]
 }
 
 workflow ALIGN {

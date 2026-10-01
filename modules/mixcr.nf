@@ -20,15 +20,11 @@ process MIXCR {
     tuple val(meta), path("${meta.id}.*.report.json"), optional: true,   emit: step_reports_json
 
     script:
-    def r1_list = r1s instanceof List ? r1s : [r1s]
-    def r2_list = r2s instanceof List ? r2s : [r2s]
-    def r1_files = r1_list.join(' ')
-    def r2_files = r2_list.join(' ')
     """
     export MI_LICENSE_FILE="\$(realpath "${license_file}")"
 
-    cat ${r1_files} > combined_R1.fastq.gz
-    cat ${r2_files} > combined_R2.fastq.gz
+    cat ${r1s} > combined_R1.fastq.gz
+    cat ${r2s} > combined_R2.fastq.gz
 
     mixcr analyze exome-seq \\
         --species hsa \\

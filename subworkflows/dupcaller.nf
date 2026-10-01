@@ -9,11 +9,6 @@ workflow DUPCALLER {
 
     main:
         if (params.dupcaller) {
-            // DUPCALLER_CALL always declares the mask and ePoN inputs; when they
-            // are not configured, stage small repo files in their place.
-            def stagedNoiseMasks = noiseMasks ? noiseMasks.collect { mask -> file(mask) } : [file(params.dupcaller_umi_allowlist)]
-            def stagedNoiseIndexes = noiseMasks ? noiseMasks.collect { mask -> file("${mask}.tbi") } : [file("${projectDir}/bin/validate_dupcaller_tags.awk")]
-
             DUPCALLER_CALL(
                 ch_paired_bams,
                 file(params.ref_fasta),
@@ -25,12 +20,11 @@ workflow DUPCALLER {
                 file(params.dupcaller_dbs_h5),
                 file(params.dupcaller_germline_vcf),
                 file("${params.dupcaller_germline_vcf}.tbi"),
-                stagedNoiseMasks,
-                stagedNoiseIndexes,
-                params.dupcaller_indel_epon ? file(params.dupcaller_indel_epon) : file(params.dupcaller_umi_allowlist),
-                params.dupcaller_indel_epon ? file("${params.dupcaller_indel_epon}.tbi") : file("${projectDir}/bin/validate_dupcaller_tags.awk"),
+                noiseMasks.collect { mask -> file(mask) },
+                noiseMasks.collect { mask -> file("${mask}.tbi") },
+                params.dupcaller_indel_epon ? file(params.dupcaller_indel_epon) : [],
+                params.dupcaller_indel_epon ? file("${params.dupcaller_indel_epon}.tbi") : [],
                 file(params.intervals_bed),
-                noiseMasks as boolean,
                 maxZeroQualFraction
             )
 

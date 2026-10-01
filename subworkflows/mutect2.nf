@@ -45,12 +45,19 @@ workflow MUTECT2 {
 
         MERGE_STATS(ch_mutect2_grouped_stats)
 
-        ch_paired_bams_scattered.multiMap { meta, tb, tbai, nb, nbai, interval_gz, interval_tbi ->
-            tumour: [meta, 'tumour', meta.tumor_id,  tb, tbai, interval_gz, interval_tbi]
-            normal: [meta, 'normal', meta.normal_id, nb, nbai, interval_gz, interval_tbi]
-        }.set { ch_pileup_scattered }
+        // Normal pileups run once per normal and shard, not per pair.
+        def ch_normal_shards = ch_paired_bams_scattered
+            .map { meta, _tb, _tbai, nb, nbai, gz, tbi -> [groupKey([meta.normal_id, gz.name], meta.tumour_count), meta, nb, nbai, gz, tbi] }
+            .groupTuple(by: 0)
+            .map { _key, metas, nbs, nbais, gzs, tbis ->
+                [metas.min { m -> m.pair_id }, 'normal', metas[0].normal_id, nbs[0], nbais[0], gzs[0], tbis[0]]
+            }
 
-        PILEUP(ch_pileup_scattered.tumour.mix(ch_pileup_scattered.normal))
+        PILEUP(
+            ch_paired_bams_scattered
+                .map { meta, tb, tbai, _nb, _nbai, gz, tbi -> [meta, 'tumour', meta.tumor_id, tb, tbai, gz, tbi] }
+                .mix(ch_normal_shards)
+        )
 
         PILEUP.out.pileup
             .map { meta, role, sample_id, shard ->
@@ -73,12 +80,9 @@ workflow MUTECT2 {
             .set { ch_pileups }
 
         ch_pileups.tumour
-            .map { meta, _role, _sample_id, pileup -> [meta.pair_id, meta, pileup] }
-            .join(
-                ch_pileups.normal.map { meta, _role, _sample_id, pileup -> [meta.pair_id, pileup] },
-                by: 0, failOnDuplicate: true, failOnMismatch: true
-            )
-            .map { _pair_id, meta, t_pileup, n_pileup -> [meta, t_pileup, n_pileup] }
+            .map { meta, _role, _sample_id, pileup -> [meta.normal_id, meta, pileup] }
+            .combine(ch_pileups.normal.map { _meta, _role, normal_id, pileup -> [normal_id, pileup] }, by: 0)
+            .map { _normal_id, meta, t_pileup, n_pileup -> [meta, t_pileup, n_pileup] }
             .set { ch_contamination_input }
 
         CONTAMINATION(ch_contamination_input)

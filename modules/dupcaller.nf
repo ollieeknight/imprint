@@ -177,15 +177,14 @@ process DUPCALLER_CALL {
     path(indel_epon)
     path(indel_epon_tbi)
     path(region_file)
-    val(use_noise_masks)
     val(max_zero_qual_fraction)
 
     output:
     tuple val(meta), path('calls'), emit: calls
 
     script:
-    def noiseArg  = use_noise_masks ? "-m ${noise_masks.join(' ')}" : ''
-    def indelArg  = params.dupcaller_indel_epon ? "-id ${indel_epon}" : ''
+    def noiseArg  = noise_masks ? "-m ${noise_masks}" : ''
+    def indelArg  = indel_epon ? "-id ${indel_epon}" : ''
     def rescueArg = params.dupcaller_rescue ? '--rescue' : ''
     def seedArg   = params.dupcaller_seed != null ? "--seed ${params.dupcaller_seed}" : ''
     """
@@ -325,9 +324,7 @@ process DUPCALLER_SUMMARIZE {
     path('dupcaller_cohort_summary_SBS96_*.txt'), emit: sbs96
 
     script:
-    def directories = (sample_dirs instanceof List ? sample_dirs : [sample_dirs])
-        .collect { dir -> "\"${dir.name}\"" }.join(' ')
     """
-    DupCaller.py summarize -i ${directories} -o dupcaller_cohort_summary.txt
+    DupCaller.py summarize -i ${sample_dirs} -o dupcaller_cohort_summary.txt
     """
 }

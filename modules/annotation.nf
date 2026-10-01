@@ -127,7 +127,7 @@ process VAFATOR {
     """
 }
 
-process TUMOR_NORMAL_FILTER {
+process MARK_ON_TARGET {
     label 'process_low'
     label 'process_low_memory'
     label 'process_very_short'
@@ -138,25 +138,26 @@ process TUMOR_NORMAL_FILTER {
     tuple val(meta), path(vaf_vcf)
 
     output:
-    tuple val(meta), path("${meta.pair_id}.somatic_filtered.vcf.gz"), path("${meta.pair_id}.somatic_filtered.vcf.gz.tbi"), emit: vcf
+    tuple val(meta), path("${meta.pair_id}.vaf.vcf.gz"), path("${meta.pair_id}.vaf.vcf.gz.tbi"), emit: vcf
 
     script:
     // Off-target runs call on padded intervals; flag sites inside the unpadded targets.
-    def mark_on_target = params.off_target && params.intervals_bed ? """
-    printf '##INFO=<ID=ON_TARGET,Number=0,Type=Flag,Description="Variant overlaps capture target intervals (non-padded)">\\n' > on_target_hdr.txt
-    awk 'BEGIN{OFS="\\t"} !/^#/{print \$1, \$2+1, \$3}' "${params.intervals_bed}" | bgzip -c > on_target_annot.bed.gz
-    tabix -s1 -b2 -e3 -c '#' on_target_annot.bed.gz
-    bcftools annotate --mark-sites "+ON_TARGET" -a on_target_annot.bed.gz -c CHROM,FROM,TO -h on_target_hdr.txt input.vcf.gz -O z -o input.marked.vcf.gz
-    mv input.marked.vcf.gz input.vcf.gz
-    tabix -f -p vcf input.vcf.gz
-    """ : ''
-    """
-    bgzip -c "${vaf_vcf}" > input.vcf.gz
-    tabix -p vcf input.vcf.gz
-    ${mark_on_target}
-    bcftools filter -i "FILTER='PASS'" input.vcf.gz -O z -o "${meta.pair_id}.somatic_filtered.vcf.gz"
-    tabix -p vcf "${meta.pair_id}.somatic_filtered.vcf.gz"
-    """
+    // Otherwise this only compresses and indexes Vafator's output for VEP.
+    if (params.off_target && params.intervals_bed) {
+        """
+        printf '##INFO=<ID=ON_TARGET,Number=0,Type=Flag,Description="Variant overlaps capture target intervals (non-padded)">\\n' > on_target_hdr.txt
+        awk 'BEGIN{OFS="\\t"} !/^#/{print \$1, \$2+1, \$3}' "${params.intervals_bed}" | bgzip -c > on_target.bed.gz
+        tabix -s1 -b2 -e3 -c '#' on_target.bed.gz
+        bcftools annotate --mark-sites +ON_TARGET -a on_target.bed.gz -c CHROM,FROM,TO -h on_target_hdr.txt \\
+            "${vaf_vcf}" -O z -o "${meta.pair_id}.vaf.vcf.gz"
+        tabix -p vcf "${meta.pair_id}.vaf.vcf.gz"
+        """
+    } else {
+        """
+        bgzip -c "${vaf_vcf}" > "${meta.pair_id}.vaf.vcf.gz"
+        tabix -p vcf "${meta.pair_id}.vaf.vcf.gz"
+        """
+    }
 }
 
 process VEP_ANNOTATE {

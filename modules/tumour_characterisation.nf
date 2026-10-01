@@ -220,7 +220,6 @@ process PATHSEQ {
     ')"
 
     if [ -n "\${ebv_contig}" ]; then
-        echo "INFO: Unmapping reads aligned to \${ebv_contig} to bypass GATK bug..." >&2
         samtools view -h "${bam}" | awk -v contig="\${ebv_contig}" '
             BEGIN { OFS="\\t" }
             function testbit(f,b){return int(f/b)%2}
@@ -240,7 +239,6 @@ process PATHSEQ {
             }
         ' | samtools view -b -o pathseq_input.bam -
     else
-        echo "INFO: Neither chrEBV nor EBV is present in ${bam} header." >&2
         ln -s "${bam}" pathseq_input.bam
     fi
 

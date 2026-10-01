@@ -41,21 +41,13 @@ def preflight_samplesheet(String path) {
         if (row.status != '0' && row.status != '1')
             error "Samplesheet row for ${row.patient}_${row.cell_type}: status must be '0' (normal) or '1' (tumour), got '${row.status}'"
 
-        if (row.fastq_1 == row.fastq_2)
-            error "Samplesheet row for ${row.patient}_${row.cell_type}: fastq_1 and fastq_2 point to the same file"
-
         ['fastq_1', 'fastq_2'].each { col ->
             if (!file(row[col]).exists())
                 error "FASTQ not found for ${row.patient}_${row.cell_type}: ${row[col]}"
         }
     }
 
-    rows.groupBy { r -> "${r.patient}_${r.cell_type}_${r.status}" }.each { key, group ->
-        def seen = group.collect { r -> "${r.fastq_1}\u0000${r.fastq_2}" }
-        if (seen.size() != seen.unique().size())
-            error "Duplicate FASTQ entries for sample ${key}: remove repeated rows"
-    }
-
+    // Also catches repeated rows and fastq_1 == fastq_2.
     def fastq_owners = [:].withDefault { [] }
     rows.each { row ->
         ['fastq_1', 'fastq_2'].each { col ->
@@ -73,15 +65,12 @@ def preflight_samplesheet(String path) {
     }
 
     rows.groupBy { r -> r.patient }.each { patient, patRows ->
-        def normals = patRows
-            .findAll { r -> r.status == '0' }
-            .collect { r -> "${r.patient}\u0000${r.cell_type}\u0000${r.status}" }
-            .unique()
-        if (normals.isEmpty())
-            error "Patient ${patient}: no normal sample (status=0) found; exactly one required"
-        if (normals.size() > 1)
+        def normals = patRows.findAll { r -> r.status == '0' }.collect { r -> r.cell_type }.unique()
+        if (normals.size() != 1)
             error "Patient ${patient}: ${normals.size()} normal samples (status=0) found; exactly one required"
     }
+
+    rows
 }
 
 def asList(value) {
@@ -96,12 +85,12 @@ def readFai(String path) {
 }
 
 def requireFileParam(String name, value) {
-    if (value == null || !file(value).exists() || !java.nio.file.Files.isRegularFile(file(value)))
+    if (value == null || !java.nio.file.Files.isRegularFile(file(value)))
         error "Required file '${name}' not found: ${value}"
 }
 
 def requireDirectoryParam(String name, value) {
-    if (value == null || !file(value).exists() || !java.nio.file.Files.isDirectory(file(value)))
+    if (value == null || !java.nio.file.Files.isDirectory(file(value)))
         error "Required directory '${name}' not found: ${value}"
 }
 
@@ -182,14 +171,6 @@ def dupcallerManifestRecords(meta, dir, String kindPrefix, String publishRoot) {
     records.sort { record -> record.path }
 }
 
-// A file and its index, recorded as `kind` and `kind_index`.
-def indexedPairRecords(meta, String kind, String base, data, index) {
-    [
-        pairManifestRecord(meta, kind, "${base}/${data.name}"),
-        pairManifestRecord(meta, "${kind}_index", "${base}/${index.name}")
-    ]
-}
-
 def donorManifestRecord(meta, String kind, String path) {
     [
         scope: 'donor',
@@ -200,40 +181,50 @@ def donorManifestRecord(meta, String kind, String path) {
     ]
 }
 
+// Channel helpers: one manifest record per published file, at its publishDir path.
+def sampleRecords(ch, String kind, String subdir) {
+    ch.flatMap { meta, files ->
+        asList(files).collect { f -> sampleManifestRecord(meta, kind, "${meta.donor}/samples/${meta.cell_type}/${subdir}/${f.name}") }
+    }
+}
+
+def pairRecords(ch, String kind, String subdir) {
+    ch.flatMap { meta, files ->
+        asList(files).collect { f -> pairManifestRecord(meta, kind, "${meta.donor}/pairs/${meta.pair_dir}/${subdir}/${f.name}") }
+    }
+}
+
+// [meta, file, index] recorded as `kind` and `kind_index`.
+def indexedPairRecords(ch, String kind, String subdir) {
+    pairRecords(ch.map { meta, data, _index -> [meta, data] }, kind, subdir)
+        .mix(pairRecords(ch.map { meta, _data, index -> [meta, index] }, "${kind}_index", subdir))
+}
+
+def donorRecords(ch, String kind, String subdir) {
+    ch.map { meta, f -> donorManifestRecord(meta, kind, "${meta.donor}/${subdir}/${f.name}") }
+}
+
+def cohortRecords(ch, String kind, String subdir) {
+    ch.flatMap { files ->
+        asList(files).collect { f -> [scope: 'cohort', id: params.cohort_name, kind: kind, path: "cohort/${subdir}/${f.name}"] }
+    }
+}
+
 workflow {
 
-    def extraNames = [
-        mixcr: 'mixcr', telseq: 'telseq', pathseq: 'pathseq',
-        hla: 'hla', optitype: 'hla',
-        kir: 'kir', kirmapper: 'kir', kir_mapper: 'kir',
-    ]
-    def requestedExtras = params.extras ? params.extras.toString().tokenize(',').collect { v -> v.trim().toLowerCase() }.findAll { v -> v } : []
-    def unknownExtras = requestedExtras.findAll { v -> !extraNames.containsKey(v) }.unique().sort()
+    def resolved_extras = listParam(params.extras).collect { v -> v.toLowerCase() }.unique().sort()
+    def unknownExtras = resolved_extras - ['hla', 'kir', 'mixcr', 'pathseq', 'telseq']
     if (unknownExtras)
         error "Unknown --extras value(s): ${unknownExtras.join(', ')}"
-    def resolved_extras = requestedExtras.collect { v -> extraNames[v] }.unique().sort()
     def run_mixcr   = 'mixcr' in resolved_extras
     def run_telseq  = 'telseq' in resolved_extras
     def run_hla     = 'hla' in resolved_extras
     def run_kir     = 'kir' in resolved_extras
     def run_pathseq = 'pathseq' in resolved_extras
 
-    def _run_defaults = [
-        outdir      : 'imprint_outs',
-        extras      : null,
-        dupcaller   : false
-    ]
-    def _overridden = _run_defaults.findAll { k, v -> params[k] != v }
-    if (_overridden) {
-        def _pad = _overridden.keySet().collect { k -> k.size() }.max()
-        log.info "Non-default parameters:\n" + _overridden.collect { k, v ->
-            "  --${k.padRight(_pad)}  ${params[k]}  (default: ${v != null ? v : 'null'})"
-        }.join("\n")
-    }
-
     if (params.samplesheet == null) error "Please provide a samplesheet using --samplesheet <path>"
     if (!file(params.samplesheet).exists())  error "Samplesheet not found: ${params.samplesheet}"
-    preflight_samplesheet(params.samplesheet)
+    def samplesheet_rows = preflight_samplesheet(params.samplesheet)
 
     if (params.genome && params.dupcaller)
         error "WGS and DupCaller are not supported together"
@@ -255,8 +246,7 @@ workflow {
 
     def effectiveLibraryMode = params.dupcaller ? 'dupcaller' : 'bulk'
     def effectiveMode = params.genome ? 'wgs' : (params.off_target ? 'wes_off_target' : 'wes')
-    def startupAssayLabel = params.genome ? 'WGS' : (params.off_target ? 'WES off-target' : 'WES target-only')
-    log.info "imprint: ${effectiveLibraryMode}, ${startupAssayLabel}${params.kit_name ? ' [' + params.kit_name + ']' : ''}"
+    log.info "imprint: ${effectiveLibraryMode}, ${effectiveMode}${params.kit_name ? ' [' + params.kit_name + ']' : ''}"
 
     requireFileParam('ref_fasta', params.ref_fasta)
     requireFileParam('genome_fai', params.genome_fai)
@@ -380,19 +370,11 @@ workflow {
     if (params.genome && params.verifybamid2_svd_wgs == null)
         error "VerifyBamID2 WGS SVD panel is not configured"
 
-    def donor_sample_counts = file(params.samplesheet)
-        .splitCsv(header: true, strip: true)
+    def donor_sample_counts = samplesheet_rows
         .groupBy { row -> row.patient }
-        .collectEntries { donor, rows ->
-            [donor, rows.collect { r -> "${r.patient}_${r.cell_type}" }.unique().size()]
-        }
-
-    def normal_count = file(params.samplesheet)
-        .splitCsv(header: true, strip: true)
-        .findAll { row -> row.status == '0' }
-        .collect { row -> "${row.patient}_${row.cell_type}" }
-        .unique()
-        .size()
+        .collectEntries { donor, rows -> [donor, rows.collect { r -> r.cell_type }.unique().size()] }
+    // Preflight enforces one normal per donor.
+    def normal_count = donor_sample_counts.size()
 
     def ch_fastq = channel
         .fromPath(params.samplesheet)
@@ -646,6 +628,7 @@ ${yaml_rows}
                 tumor_cell_type:  tm.cell_type,
                 normal_cell_type: nm.cell_type,
                 short_inserts:    tm.short_inserts,
+                tumour_count:     tm.donor_sample_count - 1,
             ]
             [ paired_meta, tb, tbai, nb, nbai ]
         }
@@ -678,88 +661,20 @@ ${yaml_rows}
     )
 
     // output_manifest.json records
-    def ch_cram_records = ALIGN.out.cram.flatMap { meta, cram, crai ->
-        def base = "${meta.donor}/samples/${meta.cell_type}/alignment"
-        [
-            sampleManifestRecord(meta, 'cram', "${base}/${cram.name}"),
-            sampleManifestRecord(meta, 'crai', "${base}/${crai.name}")
-        ]
-    }
-
-    def ch_fastp_records = ALIGN.out.fastp_json.map { meta, json ->
-        sampleManifestRecord(meta, 'fastp_json', "${meta.donor}/samples/${meta.cell_type}/qc/fastp/${json.name}")
-    }
-
-    def ch_fastp_html_records = ALIGN.out.fastp_html.map { meta, html ->
-        sampleManifestRecord(meta, 'fastp_html', "${meta.donor}/samples/${meta.cell_type}/qc/fastp/${html.name}")
-    }
-
     def ch_mosdepth_records = QC.out.mosdepth_cov.flatMap { meta, files ->
-        def base = "${meta.donor}/samples/${meta.cell_type}/qc/mosdepth"
-        asList(files).collect { outputFile ->
-            def kind = outputFile.name.endsWith('.mosdepth.summary.txt') ? 'mosdepth_summary' :
-                (outputFile.name.endsWith('.mosdepth.region.dist.txt') ? 'mosdepth_region_dist' : 'mosdepth')
-            sampleManifestRecord(meta, kind, "${base}/${outputFile.name}")
+        asList(files).collect { f ->
+            def kind = f.name.endsWith('.mosdepth.summary.txt') ? 'mosdepth_summary' :
+                (f.name.endsWith('.mosdepth.region.dist.txt') ? 'mosdepth_region_dist' : 'mosdepth')
+            sampleManifestRecord(meta, kind, "${meta.donor}/samples/${meta.cell_type}/qc/mosdepth/${f.name}")
         }
-    }
-
-    def ch_selfsm_records = QC.out.selfsm.map { meta, selfsm ->
-        sampleManifestRecord(meta, 'selfsm', "${meta.donor}/samples/${meta.cell_type}/qc/verifybamid2/${selfsm.name}")
     }
 
     def ch_riker_records = QC.out.riker_metrics.flatMap { meta, files ->
-        def base = "${meta.donor}/samples/${meta.cell_type}/qc/riker"
-        asList(files).collect { outputFile ->
-            def kind = (outputFile.name.endsWith('.hybcap-metrics.txt') || outputFile.name.endsWith('.wgs-metrics.txt')) ?
+        asList(files).collect { f ->
+            def kind = (f.name.endsWith('.hybcap-metrics.txt') || f.name.endsWith('.wgs-metrics.txt')) ?
                 'riker_primary_metrics' : 'riker_metrics'
-            sampleManifestRecord(meta, kind, "${base}/${outputFile.name}")
+            sampleManifestRecord(meta, kind, "${meta.donor}/samples/${meta.cell_type}/qc/riker/${f.name}")
         }
-    }
-
-    def ch_riker_chart_records = QC.out.riker_charts.flatMap { meta, files ->
-        asList(files).collect { outputFile ->
-            sampleManifestRecord(meta, 'riker_chart', "${meta.donor}/samples/${meta.cell_type}/qc/riker/${outputFile.name}")
-        }
-    }
-
-    def ch_error_records = QC.out.error_metrics.map { meta, metrics ->
-        sampleManifestRecord(meta, 'error_rate', "${meta.donor}/samples/${meta.cell_type}/qc/fgbio/${metrics.name}")
-    }
-
-    def ch_overlap_records = ALIGN.out.overlap_metrics.map { meta, metrics ->
-        sampleManifestRecord(meta, 'overlap_metrics', "${meta.donor}/samples/${meta.cell_type}/qc/fgbio/${metrics.name}")
-    }
-
-    def ch_markdup_records = ALIGN.out.markdup_metrics.map { meta, metrics ->
-        def folder = params.dupcaller ? 'dupcaller' : 'markdup'
-        def kind = params.dupcaller ? 'dupcaller_markdup_metrics' : 'markdup_metrics'
-        sampleManifestRecord(meta, kind, "${meta.donor}/samples/${meta.cell_type}/qc/${folder}/${metrics.name}")
-    }
-
-    def ch_dupcaller_barcode_records = ALIGN.out.barcode_metrics.map { meta, metrics ->
-        sampleManifestRecord(meta, 'dupcaller_barcode_metrics', "${meta.donor}/samples/${meta.cell_type}/qc/dupcaller/${metrics.name}")
-    }
-
-    def ch_dupcaller_tag_records = ALIGN.out.tag_metrics.map { meta, metrics ->
-        sampleManifestRecord(meta, 'dupcaller_tag_validation', "${meta.donor}/samples/${meta.cell_type}/qc/dupcaller/${metrics.name}")
-    }
-
-    def ch_dupcaller_cram_tag_records = ALIGN.out.cram_tag_metrics.map { meta, metrics ->
-        sampleManifestRecord(meta, 'dupcaller_cram_tag_validation', "${meta.donor}/samples/${meta.cell_type}/qc/dupcaller/${metrics.name}")
-    }
-
-    def ch_dupcaller_call_records = DUPCALLER.out.calls.flatMap { meta, dir ->
-        dupcallerManifestRecords(meta, dir, 'dupcaller_call',
-            "${meta.donor}/pairs/${meta.pair_dir}/dupcaller/calls")
-    }
-
-    def ch_dupcaller_burden_records = DUPCALLER.out.burden.flatMap { meta, dir ->
-        dupcallerManifestRecords(meta, dir, 'dupcaller_burden',
-            "${meta.donor}/pairs/${meta.pair_dir}/dupcaller/burden")
-    }
-
-    def ch_dupcaller_annotated_records = DUPCALLER.out.annotated.flatMap { meta, mutation_type, vcf, tbi ->
-        indexedPairRecords(meta, "dupcaller_annotated_${mutation_type}_vcf", "${meta.donor}/pairs/${meta.pair_dir}/dupcaller/annotated", vcf, tbi)
     }
 
     def ch_bqsr_records = SOMATIC_CALLING.out.bqsr_recal.map { meta, role, sample_id, table ->
@@ -771,177 +686,79 @@ ${yaml_rows}
         sampleManifestRecord(sample_meta, 'bqsr_recalibration_table', "${meta.donor}/samples/${cell_type}/qc/bqsr/${table.name}")
     }
 
-    def ch_pathseq_records = CHARACTERISATION.out.pathseq_scores.map { meta, scores ->
-        sampleManifestRecord(meta, 'pathseq_scores', "${meta.donor}/samples/${meta.cell_type}/pathseq/${scores.name}")
-    }
-
-    def ch_pathseq_bam_records = CHARACTERISATION.out.pathseq_bam.map { meta, bam ->
-        sampleManifestRecord(meta, 'pathseq_bam', "${meta.donor}/samples/${meta.cell_type}/pathseq/${bam.name}")
-    }
-
-    def ch_pathseq_filter_records = CHARACTERISATION.out.pathseq_filter_metrics.map { meta, metrics ->
-        sampleManifestRecord(meta, 'pathseq_filter_metrics', "${meta.donor}/samples/${meta.cell_type}/pathseq/${metrics.name}")
-    }
-
-    def ch_pathseq_score_records = CHARACTERISATION.out.pathseq_score_metrics.map { meta, metrics ->
-        sampleManifestRecord(meta, 'pathseq_score_metrics', "${meta.donor}/samples/${meta.cell_type}/pathseq/${metrics.name}")
-    }
-
-    def ch_pathseq_warning_records = CHARACTERISATION.out.pathseq_score_warnings.map { meta, warnings ->
-        sampleManifestRecord(meta, 'pathseq_score_warnings', "${meta.donor}/samples/${meta.cell_type}/pathseq/${warnings.name}")
-    }
-
-    def ch_telseq_records = CHARACTERISATION.out.telseq.map { meta, result ->
-        sampleManifestRecord(meta, 'telseq', "${meta.donor}/samples/${meta.cell_type}/telseq/${result.name}")
-    }
-
-    def ch_mixcr_records = CHARACTERISATION.out.mixcr_clns.map { meta, clns ->
-        sampleManifestRecord(meta, 'mixcr_clns', "${meta.donor}/samples/${meta.cell_type}/mixcr/${clns.name}")
-    }.mix(CHARACTERISATION.out.mixcr_clonotypes.flatMap { meta, files ->
-            asList(files).collect { outputFile ->
-                sampleManifestRecord(meta, 'mixcr_clonotypes', "${meta.donor}/samples/${meta.cell_type}/mixcr/${outputFile.name}")
-            }
-        })
-        .mix(CHARACTERISATION.out.mixcr_report.map { meta, result ->
-            sampleManifestRecord(meta, 'mixcr_report', "${meta.donor}/samples/${meta.cell_type}/mixcr/${result.name}")
-        })
-        .mix(CHARACTERISATION.out.mixcr_report_json.map { meta, result ->
-            sampleManifestRecord(meta, 'mixcr_report_json', "${meta.donor}/samples/${meta.cell_type}/mixcr/${result.name}")
-        })
-        .mix(CHARACTERISATION.out.mixcr_step_reports_txt.flatMap { meta, files ->
-            asList(files).collect { outputFile ->
-                sampleManifestRecord(meta, 'mixcr_step_report', "${meta.donor}/samples/${meta.cell_type}/mixcr/${outputFile.name}")
-            }
-        })
-        .mix(CHARACTERISATION.out.mixcr_step_reports_json.flatMap { meta, files ->
-            asList(files).collect { outputFile ->
-                sampleManifestRecord(meta, 'mixcr_step_report_json', "${meta.donor}/samples/${meta.cell_type}/mixcr/${outputFile.name}")
-            }
-        })
-
-    def ch_hla_records = CHARACTERISATION.out.hla_result.map { meta, result ->
-        donorManifestRecord(meta, 'optitype_result', "${meta.donor}/hla/${result.name}")
-    }
-
-    def ch_hla_plot_records = CHARACTERISATION.out.hla_plot.map { meta, plot ->
-        donorManifestRecord(meta, 'optitype_coverage_plot', "${meta.donor}/hla/${plot.name}")
-    }
-
-    def ch_kir_records = CHARACTERISATION.out.kir_ncopy.map { meta, outputFile ->
-        donorManifestRecord(meta, 'kirmapper_ncopy', "${meta.donor}/kir/${outputFile.name}")
-    }.mix(CHARACTERISATION.out.kir_calls.map { meta, outputFile ->
-        donorManifestRecord(meta, 'kirmapper_calls', "${meta.donor}/kir/${outputFile.name}")
-    }).mix(CHARACTERISATION.out.kir_reports.map { meta, outputFile ->
-        donorManifestRecord(meta, 'kirmapper_reports', "${meta.donor}/kir/${outputFile.name}")
-    }).mix(CHARACTERISATION.out.kir_raw_archive.map { meta, outputFile ->
-        donorManifestRecord(meta, 'kirmapper_raw_archive', "${meta.donor}/kir/${outputFile.name}")
-    })
-
-    def ch_final_call_records = ANNOTATION.out.final_vcf.flatMap { meta, vcf, tbi ->
-        indexedPairRecords(meta, 'ensemble_vcf', "${meta.donor}/pairs/${meta.pair_dir}/variant_calling", vcf, tbi)
-    }
-
-    def ch_varlociraptor_records = ANNOTATION.out.varlociraptor.flatMap { meta, bcf, csi ->
-        indexedPairRecords(meta, 'varlociraptor_bcf', "${meta.donor}/pairs/${meta.pair_dir}/variant_calling/raw", bcf, csi)
-    }
-
-    def ch_mutect2_records = SOMATIC_CALLING.out.mutect2_raw_vcf.flatMap { meta, vcf, tbi ->
-        indexedPairRecords(meta, 'mutect2_vcf', "${meta.donor}/pairs/${meta.pair_dir}/variant_calling/raw", vcf, tbi)
-    }
-
-    def ch_mutect2_filtered_records = SOMATIC_CALLING.out.mutect2_vcf.flatMap { meta, vcf, tbi ->
-        indexedPairRecords(meta, 'mutect2_filtered_vcf', "${meta.donor}/pairs/${meta.pair_dir}/variant_calling/raw", vcf, tbi)
-    }
-
-    def ch_mutect2_contamination_records = SOMATIC_CALLING.out.mutect2_contamination.map { meta, table ->
-        pairManifestRecord(meta, 'mutect2_contamination_table', "${meta.donor}/pairs/${meta.pair_dir}/variant_calling/raw/${table.name}")
-    }.mix(SOMATIC_CALLING.out.mutect2_segments.map { meta, table ->
-        pairManifestRecord(meta, 'mutect2_segmentation_table', "${meta.donor}/pairs/${meta.pair_dir}/variant_calling/raw/${table.name}")
-    })
-
     def ch_pon_normal_records = PON_GENERATION.out.normal_vcf.flatMap { meta, vcf, tbi ->
-        def base = 'cohort/pon/normals'
         [
-            sampleManifestRecord(meta, 'pon_normal_vcf', "${base}/${vcf.name}"),
-            sampleManifestRecord(meta, 'pon_normal_vcf_index', "${base}/${tbi.name}")
+            sampleManifestRecord(meta, 'pon_normal_vcf', "cohort/pon/normals/${vcf.name}"),
+            sampleManifestRecord(meta, 'pon_normal_vcf_index', "cohort/pon/normals/${tbi.name}")
         ]
     }
 
-    def ch_strelka_records = SOMATIC_CALLING.out.strelka_snv
-        .mix(SOMATIC_CALLING.out.strelka_indel)
-        .flatMap { meta, vcf, tbi ->
-            indexedPairRecords(meta, 'strelka2_vcf', "${meta.donor}/pairs/${meta.pair_dir}/variant_calling/raw", vcf, tbi)
-        }
-
-    def ch_deepsomatic_records = SOMATIC_CALLING.out.deepsomatic_vcf.flatMap { meta, vcf, tbi ->
-        indexedPairRecords(meta, 'deepsomatic_vcf', "${meta.donor}/pairs/${meta.pair_dir}/variant_calling/raw", vcf, tbi)
-    }
-
-    def ch_manta_records = SOMATIC_CALLING.out.manta_sv.flatMap { meta, vcf, tbi ->
-        indexedPairRecords(meta, 'manta_vcf', "${meta.donor}/pairs/${meta.pair_dir}/variant_calling", vcf, tbi)
-    }
-
-    def ch_cohort_records = QC.out.multiqc_report
-        .map { report -> [scope: 'cohort', id: params.cohort_name, kind: 'multiqc_report', path: "cohort/multiqc/${report.name}"] }
-        .mix(QC.out.multiqc_data.map { data -> [scope: 'cohort', id: params.cohort_name, kind: 'multiqc_data', path: "cohort/multiqc/${data.name}"] })
-        .mix(QC.out.somalier.flatMap { files ->
-            asList(files).collect { outputFile ->
-                [scope: 'cohort', id: params.cohort_name, kind: 'somalier', path: "cohort/somalier/${outputFile.name}"]
-            }
-        })
-        .mix(PON_GENERATION.out.pon.flatMap { _cohort, vcf, tbi ->
+    def ch_dupcaller_records = DUPCALLER.out.calls
+        .flatMap { meta, dir -> dupcallerManifestRecords(meta, dir, 'dupcaller_call', "${meta.donor}/pairs/${meta.pair_dir}/dupcaller/calls") }
+        .mix(DUPCALLER.out.burden.flatMap { meta, dir -> dupcallerManifestRecords(meta, dir, 'dupcaller_burden', "${meta.donor}/pairs/${meta.pair_dir}/dupcaller/burden") })
+        .mix(DUPCALLER.out.annotated.flatMap { meta, mutation_type, vcf, tbi ->
+            def base = "${meta.donor}/pairs/${meta.pair_dir}/dupcaller/annotated"
             [
-                [scope: 'cohort', id: params.cohort_name, kind: 'pon_vcf', path: "cohort/pon/${vcf.name}"],
-                [scope: 'cohort', id: params.cohort_name, kind: 'pon_vcf_index', path: "cohort/pon/${tbi.name}"]
+                pairManifestRecord(meta, "dupcaller_annotated_${mutation_type}_vcf", "${base}/${vcf.name}"),
+                pairManifestRecord(meta, "dupcaller_annotated_${mutation_type}_vcf_index", "${base}/${tbi.name}")
             ]
         })
-        .mix(DUPCALLER.out.cohort_summary.map { outputFile ->
-            [scope: 'cohort', id: params.cohort_name, kind: 'dupcaller_summary', path: "cohort/dupcaller/${outputFile.name}"]
-        })
-        .mix(DUPCALLER.out.cohort_sbs96.flatMap { files ->
-            asList(files).collect { outputFile ->
-                [scope: 'cohort', id: params.cohort_name, kind: 'dupcaller_sbs96', path: "cohort/dupcaller/${outputFile.name}"]
-            }
-        })
 
-    def ch_manifest_records = ch_cram_records
-        .mix(ch_fastp_records)
-        .mix(ch_fastp_html_records)
-        .mix(ch_mosdepth_records)
-        .mix(ch_selfsm_records)
-        .mix(ch_riker_records)
-        .mix(ch_riker_chart_records)
-        .mix(ch_error_records)
-        .mix(ch_overlap_records)
-        .mix(ch_markdup_records)
-        .mix(ch_dupcaller_barcode_records)
-        .mix(ch_dupcaller_tag_records)
-        .mix(ch_dupcaller_cram_tag_records)
-        .mix(ch_dupcaller_call_records)
-        .mix(ch_dupcaller_burden_records)
-        .mix(ch_dupcaller_annotated_records)
-        .mix(ch_bqsr_records)
-        .mix(ch_pathseq_records)
-        .mix(ch_pathseq_bam_records)
-        .mix(ch_pathseq_filter_records)
-        .mix(ch_pathseq_score_records)
-        .mix(ch_pathseq_warning_records)
-        .mix(ch_telseq_records)
-        .mix(ch_mixcr_records)
-        .mix(ch_hla_records)
-        .mix(ch_hla_plot_records)
-        .mix(ch_kir_records)
-        .mix(ch_final_call_records)
-        .mix(ch_varlociraptor_records)
-        .mix(ch_mutect2_records)
-        .mix(ch_mutect2_filtered_records)
-        .mix(ch_mutect2_contamination_records)
-        .mix(ch_pon_normal_records)
-        .mix(ch_strelka_records)
-        .mix(ch_deepsomatic_records)
-        .mix(ch_manta_records)
-        .mix(ch_cohort_records)
-        .collect()
+    def ch_manifest_records = channel.empty().mix(
+        sampleRecords(ALIGN.out.cram.map { meta, cram, _crai -> [meta, cram] }, 'cram', 'alignment'),
+        sampleRecords(ALIGN.out.cram.map { meta, _cram, crai -> [meta, crai] }, 'crai', 'alignment'),
+        sampleRecords(ALIGN.out.fastp_json, 'fastp_json', 'qc/fastp'),
+        sampleRecords(ALIGN.out.fastp_html, 'fastp_html', 'qc/fastp'),
+        ch_mosdepth_records,
+        sampleRecords(QC.out.selfsm, 'selfsm', 'qc/verifybamid2'),
+        ch_riker_records,
+        sampleRecords(QC.out.riker_charts, 'riker_chart', 'qc/riker'),
+        sampleRecords(QC.out.error_metrics, 'error_rate', 'qc/fgbio'),
+        sampleRecords(ALIGN.out.overlap_metrics, 'overlap_metrics', 'qc/fgbio'),
+        sampleRecords(ALIGN.out.markdup_metrics,
+            params.dupcaller ? 'dupcaller_markdup_metrics' : 'markdup_metrics',
+            params.dupcaller ? 'qc/dupcaller' : 'qc/markdup'),
+        sampleRecords(ALIGN.out.barcode_metrics, 'dupcaller_barcode_metrics', 'qc/dupcaller'),
+        sampleRecords(ALIGN.out.tag_metrics, 'dupcaller_tag_validation', 'qc/dupcaller'),
+        sampleRecords(ALIGN.out.cram_tag_metrics, 'dupcaller_cram_tag_validation', 'qc/dupcaller'),
+        ch_dupcaller_records,
+        ch_bqsr_records,
+        sampleRecords(CHARACTERISATION.out.pathseq_scores, 'pathseq_scores', 'pathseq'),
+        sampleRecords(CHARACTERISATION.out.pathseq_bam, 'pathseq_bam', 'pathseq'),
+        sampleRecords(CHARACTERISATION.out.pathseq_filter_metrics, 'pathseq_filter_metrics', 'pathseq'),
+        sampleRecords(CHARACTERISATION.out.pathseq_score_metrics, 'pathseq_score_metrics', 'pathseq'),
+        sampleRecords(CHARACTERISATION.out.pathseq_score_warnings, 'pathseq_score_warnings', 'pathseq'),
+        sampleRecords(CHARACTERISATION.out.telseq, 'telseq', 'telseq'),
+        sampleRecords(CHARACTERISATION.out.mixcr_clns, 'mixcr_clns', 'mixcr'),
+        sampleRecords(CHARACTERISATION.out.mixcr_clonotypes, 'mixcr_clonotypes', 'mixcr'),
+        sampleRecords(CHARACTERISATION.out.mixcr_report, 'mixcr_report', 'mixcr'),
+        sampleRecords(CHARACTERISATION.out.mixcr_report_json, 'mixcr_report_json', 'mixcr'),
+        sampleRecords(CHARACTERISATION.out.mixcr_step_reports_txt, 'mixcr_step_report', 'mixcr'),
+        sampleRecords(CHARACTERISATION.out.mixcr_step_reports_json, 'mixcr_step_report_json', 'mixcr'),
+        donorRecords(CHARACTERISATION.out.hla_result, 'optitype_result', 'hla'),
+        donorRecords(CHARACTERISATION.out.hla_plot, 'optitype_coverage_plot', 'hla'),
+        donorRecords(CHARACTERISATION.out.kir_ncopy, 'kirmapper_ncopy', 'kir'),
+        donorRecords(CHARACTERISATION.out.kir_calls, 'kirmapper_calls', 'kir'),
+        donorRecords(CHARACTERISATION.out.kir_reports, 'kirmapper_reports', 'kir'),
+        donorRecords(CHARACTERISATION.out.kir_raw_archive, 'kirmapper_raw_archive', 'kir'),
+        indexedPairRecords(ANNOTATION.out.final_vcf, 'ensemble_vcf', 'variant_calling'),
+        indexedPairRecords(ANNOTATION.out.varlociraptor, 'varlociraptor_bcf', 'variant_calling/raw'),
+        indexedPairRecords(SOMATIC_CALLING.out.mutect2_raw_vcf, 'mutect2_vcf', 'variant_calling/raw'),
+        indexedPairRecords(SOMATIC_CALLING.out.mutect2_vcf, 'mutect2_filtered_vcf', 'variant_calling/raw'),
+        pairRecords(SOMATIC_CALLING.out.mutect2_contamination, 'mutect2_contamination_table', 'variant_calling/raw'),
+        pairRecords(SOMATIC_CALLING.out.mutect2_segments, 'mutect2_segmentation_table', 'variant_calling/raw'),
+        ch_pon_normal_records,
+        indexedPairRecords(SOMATIC_CALLING.out.strelka_snv.mix(SOMATIC_CALLING.out.strelka_indel), 'strelka2_vcf', 'variant_calling/raw'),
+        indexedPairRecords(SOMATIC_CALLING.out.deepsomatic_vcf, 'deepsomatic_vcf', 'variant_calling/raw'),
+        indexedPairRecords(SOMATIC_CALLING.out.manta_sv, 'manta_vcf', 'variant_calling'),
+        cohortRecords(QC.out.multiqc_report, 'multiqc_report', 'multiqc'),
+        cohortRecords(QC.out.multiqc_data, 'multiqc_data', 'multiqc'),
+        cohortRecords(QC.out.somalier, 'somalier', 'somalier'),
+        cohortRecords(PON_GENERATION.out.pon.map { _cohort, vcf, _tbi -> vcf }, 'pon_vcf', 'pon'),
+        cohortRecords(PON_GENERATION.out.pon.map { _cohort, _vcf, tbi -> tbi }, 'pon_vcf_index', 'pon'),
+        cohortRecords(DUPCALLER.out.cohort_summary, 'dupcaller_summary', 'dupcaller'),
+        cohortRecords(DUPCALLER.out.cohort_sbs96, 'dupcaller_sbs96', 'dupcaller')
+    ).collect()
 
     def manifest_info = [
         cohort: params.cohort_name,

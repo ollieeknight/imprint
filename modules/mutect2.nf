@@ -15,23 +15,21 @@ process CALL {
 
     script:
     def mem_gb            = task.memory ? task.memory.toGiga() - 2 : 14
-    def pcr_indel_model   = '--pcr-indel-model AGGRESSIVE'
     // null autodetects short inserts from fastp.
     def auto_short       = (params.filter_soft_clips != false) && (meta.short_inserts ?: false)
     def soft_clip_filter = params.filter_soft_clips == true || auto_short
         ? '--dont-use-soft-clipped-bases' : ''
-    def pon_flags = "--panel-of-normals ${params.pon_vcf}"
     """
     gatk --java-options "-Xmx${mem_gb}g" Mutect2 \\
         -R "${params.ref_fasta}" \\
         -I "${tumor_bam}"  --tumor-sample  "${meta.tumor_id}" \\
         -I "${normal_bam}" --normal-sample "${meta.normal_id}" \\
         --germline-resource "${params.gnomad_germline_resource_vcf}" \\
-        ${pon_flags} \\
+        --panel-of-normals "${params.pon_vcf}" \\
         -L "${interval_gz}" \\
         --f1r2-tar-gz "${meta.tumor_id}_${interval_gz.simpleName}_f1r2.tar.gz" \\
         -O "${meta.tumor_id}_mutect2.${interval_gz.simpleName}.unfiltered.vcf.gz" \\
-        ${pcr_indel_model} \\
+        --pcr-indel-model AGGRESSIVE \\
         ${soft_clip_filter} \\
         --tumor-lod-to-emit 0 \\
         --initial-tumor-lod 0 \\
@@ -83,8 +81,6 @@ process GATHER_PILEUPS {
         ${input_args} \\
         --sequence-dictionary "${params.ref_dict}" \\
         -O "${sample_id}_pileups.table"
-
-    rm ${pileup_tables.join(' ')}
     """
 }
 
@@ -133,8 +129,6 @@ process MERGE_STATS {
     gatk --java-options "-Xmx${mem_gb}g" MergeMutectStats \\
         ${stats_args} \\
         -O "${meta.tumor_id}_merged.stats"
-
-    rm ${stats.join(' ')}
     """
 }
 
@@ -227,10 +221,7 @@ process APPLY_BQSR {
         --bqsr-recal-file "${recal_table}" \\
         -O "${sample_id}_bqsr.bam"
 
-    # GATK writes a companion "<prefix>.bai"; the rest of the pipeline addresses indexes
-    # as "<file>.bam.bai". Re-index and drop the stray so the emitted pair is consistent.
-    rm -f "${sample_id}_bqsr.bai"
-    samtools index "${sample_id}_bqsr.bam"
+    mv "${sample_id}_bqsr.bai" "${sample_id}_bqsr.bam.bai"
     """
 }
 
@@ -249,11 +240,8 @@ process MERGE_VCFS {
     tuple val(meta), path("${meta.pair_id}.${caller}.unfiltered.vcf.gz"), path("${meta.pair_id}.${caller}.unfiltered.vcf.gz.tbi"), emit: vcf
 
     script:
-    def vcf_args = (vcfs instanceof List ? vcfs.sort { v -> v.name } : [vcfs]).join(' ')
     """
-    bcftools concat -a -D ${vcf_args} -O z -o "${meta.pair_id}.${caller}.unfiltered.vcf.gz"
+    bcftools concat -a -D ${vcfs} -O z -o "${meta.pair_id}.${caller}.unfiltered.vcf.gz"
     tabix -p vcf "${meta.pair_id}.${caller}.unfiltered.vcf.gz"
-
-    rm ${vcf_args} \$(echo ${vcf_args} | tr ' ' '\n' | sed 's/\$/.tbi/')
     """
 }
